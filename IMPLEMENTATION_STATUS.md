@@ -1,6 +1,16 @@
 # Implementation and verification status
 
-Verified on 2026-10-21. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
+Latest offline verification on 2026-10-22. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
+
+## OpenRouter image credit fallback and Gemini key pools
+
+OpenRouter remains the primary image provider. An image HTTP 402 credit failure switches the current invocation to direct Gemini, using `gemini_model` and the exact saved standalone prompts. Temporary OpenRouter in-flight budget errors retain bounded retries instead. Other OpenRouter failures do not trigger fallback, and text generation keeps its configured provider without fallback.
+
+`GEMINI_API_KEY` accepts a JSON array in the local `.env`, an existing single key, or a comma-separated list. Duplicate keys are removed. Gemini advances through the ordered pool on HTTP 402 or 429 and retains a working key for subsequent images. Rate-limit exhaustion uses the stage's persisted bounded retries. Each invocation starts with OpenRouter and the first Gemini key again. Setup reports the optional fallback model and key count without exposing values; an empty pool remains acceptable for OpenRouter but fails direct Gemini setup. The local `.env` was initialized with an empty array, preserving other credentials; real Gemini keys still need to be supplied.
+
+Every fallback and key change reserves a separate image request cap, and usage records the actual provider and model. HTTP diagnostics redact every key in the pool, including unused keys. Adding fallback adopts existing primary image checkpoints without discarding retry limits or artifact hash checks. Changing Gemini credentials keeps completed images reusable; changing the fallback model invalidates image generation without changing narration or speech caches.
+
+Focused provider checks pass **101 tests** in **4.66 seconds**, run with `.venv/Scripts/python.exe -m pytest -q tests/test_openrouter_images.py tests/test_openrouter.py -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/image-credit-fallback-regression`. The complete offline suite passes **192 tests** in **80.62 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/image-credit-fallback-full`. Coverage includes credit-only switching, Gemini key rotation and exhaustion, legacy single-key compatibility, environment precedence, error redaction, budget reservations, cache adoption, corruption checks, recovery, and real FFmpeg integration. The local `doctor` command succeeds with zero configured fallback keys. No live generation requests were made and no retained jobs were changed; authenticated Gemini fallback and image quality remain unverified.
 
 ## Workflow progress tracking
 

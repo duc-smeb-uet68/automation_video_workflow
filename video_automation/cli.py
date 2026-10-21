@@ -10,6 +10,7 @@ from . import assets, media
 from .models import Config
 from .pipeline import Pipeline
 from .progress import read_progress
+from .providers import gemini_keys
 from .store import PipelineError, Store, worker_lock, write_json
 
 
@@ -52,12 +53,15 @@ def doctor(config):
         except (OSError, PipelineError):
             checks[name] = False
     for name in config.generation_keys:
-        checks[name] = bool(os.environ.get(name))
+        checks[name] = bool(gemini_keys()) if name == "GEMINI_API_KEY" else bool(os.environ.get(name))
     checks["voice_id"] = bool(config.voice_id)
     checks["music_file"] = not config.music_path or config.music_path.is_file()
     print(json.dumps({"ready_for_live_generation": all(checks.values()),
                       "text_provider": config.text_provider, "text_model": config.text_model,
-                      "image_provider": config.image_provider, "image_model": config.image_model, "checks": checks}, indent=2))
+                      "image_provider": config.image_provider, "image_model": config.image_model,
+                      "image_fallback": {"provider": "gemini", "model": config.gemini_model,
+                                         "configured_keys": len(gemini_keys())} if config.image_provider == "openrouter" else None,
+                      "checks": checks}, indent=2))
     return 0 if all(checks.values()) else 1
 
 
@@ -123,7 +127,8 @@ def main(argv=None):
                 else:
                     pipeline = Pipeline.create(config, args.input, args.job_id)
                 if not pipeline.store.manifest.stages:
-                    missing = [name for name in config.generation_keys if not os.environ.get(name)]
+                    missing = [name for name in config.generation_keys
+                               if not (gemini_keys() if name == "GEMINI_API_KEY" else os.environ.get(name))]
                     if not config.voice_id:
                         missing.append("voice_id in configuration")
                     if missing:

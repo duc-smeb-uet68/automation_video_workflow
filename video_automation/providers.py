@@ -77,6 +77,34 @@ VISUAL_SCHEMA = object_schema({"cues": {"type": "array", "items": object_schema(
     "overlay_text": {"type": ["string", "null"]}, "motion": {"type": "string", "enum": ["hold", "slow_push"]}})}})
 
 
+def gemini_keys() -> list[str]:
+    """Read an ordered key pool while retaining single-key environment compatibility."""
+    value = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not value:
+        return []
+    if value.startswith("["):
+        try:
+            keys = json.loads(value)
+        except ValueError:
+            raise PipelineError("GEMINI_API_KEY must be a valid JSON array of nonempty strings") from None
+    else:
+        keys = value.split(",")
+    if not isinstance(keys, list) or any(not isinstance(key, str) or not key.strip() for key in keys):
+        raise PipelineError("GEMINI_API_KEY must contain only nonempty strings")
+    return list(dict.fromkeys(key.strip() for key in keys))
+
+
+class ProviderHTTPError(PipelineError):
+    def __init__(self, message, status_code, details):
+        super().__init__(message)
+        self.status_code = status_code
+        self.details = details
+
+
+class TemporaryProviderHTTPError(ProviderHTTPError, TemporaryError):
+    pass
+
+
 def validate_visual_plan(cues, plan):
     """Validate generated and cached plans before approving a batch checkpoint."""
     try:
@@ -100,6 +128,8 @@ class Providers:
     def __init__(self, store):
         self.store = store
         self.config = store.config
+        self.openrouter_image_credit_exhausted = False
+        self.gemini_key_index = 0
 
     @staticmethod
     def error_details(response, headers) -> dict:
@@ -119,7 +149,7 @@ class Providers:
                 upstream = {"message": upstream} if not upstream.lstrip().startswith("<") else {}
         if isinstance(upstream, dict):
             upstream = upstream.get("error", upstream.get("detail", upstream))
-        details = {"provider_name": metadata.get("provider_name"),
+        details = {"provider_name": metadata.get("provider_name"), "limit_source": metadata.get("limit_source"),
                    "request_id": response.headers.get("request-id") or response.headers.get("x-request-id")}
         for node, prefix in ((error, ""), (upstream, "upstream_")):
             if isinstance(node, str):
@@ -131,6 +161,11 @@ class Providers:
         secrets.update(value.partition(" ")[2] for value in list(secrets) if value.lower().startswith("bearer "))
         secrets.update(value for name in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY")
                        if (value := os.environ.get(name)))
+        try:
+            secrets.update(gemini_keys())
+        except PipelineError:
+            # A malformed optional pool must not replace the original provider error.
+            pass
         safe = {}
         for field, value in details.items():
             if isinstance(value, (str, int)):
@@ -144,14 +179,18 @@ class Providers:
         entry = self.store.reserve_request(operation)
         entry["provider"] = urlparse(url).hostname
         entry["model"] = payload.get("model", payload.get("model_id"))
+        if entry["provider"] == "generativelanguage.googleapis.com":
+            entry["model"] = self.config.gemini_model
         try:
             with httpx.Client(timeout=self.config.request_timeout_seconds) as client:
                 response = client.post(url, headers=headers, json=payload, params=params)
             entry["http_status"] = response.status_code
             if not response.is_success:
-                temporary = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
-                entry["status"] = "temporary_failure" if temporary else "failed"
                 details = self.error_details(response, headers)
+                temporary = (response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+                             or (entry["provider"] == "openrouter.ai" and response.status_code == 402
+                                 and details.get("limit_source") == "openrouter_in_flight_budget"))
+                entry["status"] = "temporary_failure" if temporary else "failed"
                 name = f"responses/{operation}_{digest(payload)[:12]}_{len(self.store.manifest.usage):04}_error.json"
                 write_json(self.store.path(name), {"http_status": response.status_code, "error": details})
                 entry["response_path"] = name
@@ -160,8 +199,9 @@ class Providers:
                 reasons = list(dict.fromkeys(details[field] for field in
                     ("status", "type", "message", "upstream_status", "upstream_message") if details.get(field)))
                 reason = "; ".join(reasons) or "Provider returned no structured error details"
-                error_type = TemporaryError if temporary else PipelineError
-                raise error_type(f"{operation}: {'temporary ' if temporary else ''}HTTP {response.status_code}: {reason}")
+                error_type = TemporaryProviderHTTPError if temporary else ProviderHTTPError
+                raise error_type(f"{operation}: {'temporary ' if temporary else ''}HTTP {response.status_code}: {reason}",
+                                 response.status_code, details)
             try:
                 data = response.json()
             except ValueError as exc:
@@ -300,11 +340,18 @@ class Providers:
                           "apply_text_normalization": "off"}, params={"output_format": "mp3_44100_128"})
 
     def image(self, prompt: str) -> bytes:
-        if self.config.image_provider == "openrouter":
+        if self.config.image_provider == "openrouter" and not self.openrouter_image_credit_exhausted:
             payload = {"model": self.config.image_model, "prompt": prompt,
                        "n": 1, "resolution": "1K", "aspect_ratio": "16:9"}
-            data = self.post("image", "https://openrouter.ai/api/v1/images",
-                             {"Authorization": f"Bearer {self.key('OPENROUTER_API_KEY')}"}, payload)
+            try:
+                data = self.post("image", "https://openrouter.ai/api/v1/images",
+                                 {"Authorization": f"Bearer {self.key('OPENROUTER_API_KEY')}"}, payload)
+            except ProviderHTTPError as exc:
+                if exc.status_code != 402 or isinstance(exc, TemporaryError):
+                    raise
+                self.openrouter_image_credit_exhausted = True
+                self.store.log("image_provider_fallback", provider="gemini", reason="openrouter_insufficient_credits")
+                return self.gemini_image(prompt)
             images = data.get("data")
             if not isinstance(images, list) or not images or not isinstance(images[0], dict):
                 raise TemporaryError("OpenRouter returned no image; retry limit applies")
@@ -319,9 +366,35 @@ class Providers:
                 raise TemporaryError("OpenRouter returned an empty image; retry limit applies")
             return content
 
+        return self.gemini_image(prompt)
+
+    def gemini_image(self, prompt: str) -> bytes:
+        keys = gemini_keys()
+        if not keys:
+            raise PipelineError("Image generation requires Gemini keys: set GEMINI_API_KEY to a nonempty JSON array in .env"
+                                + ("; OpenRouter image credits are exhausted" if self.openrouter_image_credit_exhausted else ""))
+        rate_limited = None
+        for index in range(self.gemini_key_index, len(keys)):
+            self.gemini_key_index = index
+            try:
+                return self.gemini_image_request(prompt, keys[index])
+            except ProviderHTTPError as exc:
+                if exc.status_code not in {402, 429}:
+                    raise
+                if exc.status_code == 429:
+                    rate_limited = (index, exc)
+                if index + 1 < len(keys):
+                    self.store.log("image_key_fallback", provider="gemini", key_number=index + 2,
+                                   reason=f"HTTP {exc.status_code}")
+        if rate_limited is not None:
+            self.gemini_key_index, error = rate_limited
+            raise TemporaryError(f"image: all remaining Gemini API keys exhausted; bounded retries apply; {error}") from error
+        raise PipelineError("image: all remaining Gemini API keys have exhausted credits; update GEMINI_API_KEY in .env")
+
+    def gemini_image_request(self, prompt: str, key: str) -> bytes:
         parts = [{"text": prompt}]
-        data = self.post("image", f"https://generativelanguage.googleapis.com/v1beta/models/{quote(self.config.image_model, safe='')}:generateContent",
-                         {"x-goog-api-key": self.key("GEMINI_API_KEY")},
+        data = self.post("image", f"https://generativelanguage.googleapis.com/v1beta/models/{quote(self.config.gemini_model, safe='')}:generateContent",
+                         {"x-goog-api-key": key},
                          {"contents": [{"role": "user", "parts": parts}],
                           "generationConfig": {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": {"aspectRatio": "16:9"}}})
         for candidate in data.get("candidates", []):

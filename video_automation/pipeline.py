@@ -220,6 +220,13 @@ class Pipeline:
             relative = f"images/{cue.id}.png"
             prompt = record["prompt"]
             inputs = {"prompt": prompt, "image_generation": self.config.image_cache_settings}
+            previous = manifest.stages.get(f"image.{cue.id}")
+            if previous and "gemini_fallback_model" in inputs["image_generation"]:
+                legacy_settings = {key: value for key, value in inputs["image_generation"].items()
+                                   if key != "gemini_fallback_model"}
+                if previous.input_hash == digest({"prompt": prompt, "image_generation": legacy_settings}):
+                    # Existing primary images and retry budgets remain valid when adding fallback.
+                    previous.input_hash = digest(inputs)
 
             def generate(relative=relative, prompt=prompt):
                 result = self.generate_image(prompt, store.path(relative))

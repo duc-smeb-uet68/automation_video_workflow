@@ -72,9 +72,11 @@ class Config(Record):
 
     @property
     def image_cache_settings(self) -> dict:
-        return {"provider": self.image_provider, "model": self.image_model, "adapter_version": 2,
-                "strategy": "text_only",
-                "resolution": "1K", "aspect_ratio": "16:9"}
+        settings = {"provider": self.image_provider, "model": self.image_model, "adapter_version": 2,
+                    "strategy": "text_only", "resolution": "1K", "aspect_ratio": "16:9"}
+        if self.image_provider == "openrouter":
+            settings["gemini_fallback_model"] = self.gemini_model
+        return settings
 
     @model_validator(mode="after")
     def frame_shape(self):

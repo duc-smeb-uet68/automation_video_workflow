@@ -7,11 +7,11 @@ import pytest
 from PIL import Image
 
 from video_automation import media
-from video_automation.cli import doctor, main
+from video_automation.cli import doctor, load_credentials, main
 from video_automation.models import Config, Cue, Manifest
 from video_automation.pipeline import Pipeline
-from video_automation.providers import Providers, STYLE
-from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, file_hash, read_json
+from video_automation.providers import Providers, STYLE, gemini_keys
+from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json
 
 
 def png(color="#fffaf0"):
@@ -315,3 +315,295 @@ def test_non_json_http_error_saves_status_without_echoing_response_body(store, m
         Providers(store).post("image", "https://example.org/image", {}, {})
     saved = store.path(store.manifest.usage[-1]["response_path"]).read_text(encoding="utf-8")
     assert "private debug body" not in str(error.value) and "private debug body" not in saved
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", []), ("[]", []), ("single-key", ["single-key"]),
+    ('["first-key", "second-key"]', ["first-key", "second-key"]),
+    ("first-key, second-key", ["first-key", "second-key"]),
+    ('[" first-key ", "first-key", "second-key"]', ["first-key", "second-key"]),
+])
+def test_gemini_key_pool_formats(monkeypatch, value, expected):
+    monkeypatch.setenv("GEMINI_API_KEY", value)
+    assert gemini_keys() == expected
+
+
+@pytest.mark.parametrize("value", ['["private-key",', '["private-key", null]', '[""]', "private-key,"])
+def test_invalid_gemini_key_pool_fails_without_echoing_secrets(monkeypatch, value):
+    monkeypatch.setenv("GEMINI_API_KEY", value)
+    with pytest.raises(PipelineError, match="GEMINI_API_KEY") as error:
+        gemini_keys()
+    assert "private-key" not in str(error.value)
+
+
+def test_env_loads_key_array_and_preserves_process_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    path = tmp_path / ".env"
+    path.write_text('GEMINI_API_KEY=\'["local-first", "local-second"]\'\n', encoding="utf-8")
+    load_credentials(path)
+    assert gemini_keys() == ["local-first", "local-second"]
+    monkeypatch.setenv("GEMINI_API_KEY", '["process-key"]')
+    load_credentials(path)
+    assert gemini_keys() == ["process-key"]
+
+
+def gemini_response(content):
+    return {"candidates": [{"content": {"parts": [{"inlineData": {
+        "mimeType": "image/png", "data": base64.b64encode(content).decode()}}]}}]}
+
+
+@pytest.mark.parametrize("key_failure", [402, 429])
+def test_credit_fallback_rotates_gemini_keys_and_sticks_to_working_key(store, monkeypatch, key_failure):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setenv("GEMINI_API_KEY", '["first-secret", "working-secret", "unused-secret"]')
+    store.config.gemini_model = "fixture-gemini-image-model"
+    content, requests = png(), []
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "openrouter.ai":
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        if request.headers["x-goog-api-key"] == "first-secret":
+            return httpx.Response(key_failure, json={"error": {"status": "RESOURCE_EXHAUSTED",
+                "message": "Quota exhausted first-secret working-secret unused-secret"}})
+        return httpx.Response(200, json=gemini_response(content))
+    mock_http(monkeypatch, handler)
+    client = Providers(store)
+    assert client.image("Exact first prompt.") == content
+    assert client.image("Exact second prompt.") == content
+    assert [request.url.host for request in requests] == ["openrouter.ai"] + ["generativelanguage.googleapis.com"] * 3
+    assert [request.headers["x-goog-api-key"] for request in requests[1:]] == ["first-secret", "working-secret", "working-secret"]
+    assert all("models/fixture-gemini-image-model:generateContent" in str(request.url) for request in requests[1:])
+    assert json.loads(requests[1].content)["contents"] == [{"role": "user", "parts": [{"text": "Exact first prompt."}]}]
+    assert all(entry["model"] == "fixture-gemini-image-model" for entry in store.manifest.usage[1:])
+    assert len(store.manifest.usage) == 4
+    saved = "\n".join(path.read_text(encoding="utf-8") for path in store.folder.rglob("*.json"))
+    saved += store.path("execution.jsonl").read_text(encoding="utf-8")
+    assert all(secret not in saved for secret in ("openrouter-secret", "first-secret", "working-secret", "unused-secret"))
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429, 500])
+def test_other_openrouter_errors_do_not_trigger_fallback(store, monkeypatch, status):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["gemini-key"]')
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": {"message": "Fixture failure"}})
+    mock_http(monkeypatch, handler)
+    with pytest.raises(PipelineError, match=f"HTTP {status}"):
+        Providers(store).image("A scene.")
+    assert len(requests) == 1 and requests[0].url.host == "openrouter.ai"
+
+
+def test_openrouter_in_flight_budget_uses_bounded_retry_without_fallback(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["gemini-key"]')
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(402, json={"error": {"message": "In-flight budget exhausted",
+                              "metadata": {"limit_source": "openrouter_in_flight_budget"}}})
+    mock_http(monkeypatch, handler)
+    client = Providers(store)
+    with pytest.raises(TemporaryError, match="HTTP 402"):
+        store.task("image.fixture", {}, lambda: client.image("A scene."))
+    assert len(requests) == store.manifest.stages["image.fixture"].attempts == store.config.max_attempts
+    assert all(request.url.host == "openrouter.ai" for request in requests)
+
+
+@pytest.mark.parametrize("value", ["", "[]"])
+def test_openrouter_credit_failure_without_gemini_keys_is_actionable(store, monkeypatch, value):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", value)
+    mock_http(monkeypatch, lambda request: httpx.Response(402, json={"error": {"message": "Insufficient credits"}}))
+    with pytest.raises(PipelineError, match="set GEMINI_API_KEY.*OpenRouter image credits are exhausted"):
+        Providers(store).image("A scene.")
+    assert len(store.manifest.usage) == 1
+
+
+@pytest.mark.parametrize("status", [402, 429])
+def test_gemini_pool_exhaustion_is_bounded_and_resume_preserves_attempts(store, monkeypatch, status):
+    store.config.image_provider = "gemini"
+    monkeypatch.setenv("GEMINI_API_KEY", '["first-key", "second-key"]')
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(status, json={"error": {"message": "Exhausted"}})
+    mock_http(monkeypatch, handler)
+    client = Providers(store)
+    with pytest.raises(PipelineError, match="Gemini API keys.*exhausted") as error:
+        store.task("image.fixture", {}, lambda: client.image("A scene."))
+    assert isinstance(error.value, TemporaryError) == (status == 429)
+    assert len(requests) == (3 if status == 429 else 2)
+    if status == 429:
+        resumed = Store(store.folder, store.config)
+        with pytest.raises(PipelineError, match="retry limit reached"):
+            resumed.task("image.fixture", {}, lambda: pytest.fail("No request allowed"))
+
+
+@pytest.mark.parametrize("status", [400, 403, 500])
+def test_gemini_other_errors_do_not_rotate_keys(store, monkeypatch, status):
+    store.config.image_provider = "gemini"
+    monkeypatch.setenv("GEMINI_API_KEY", '["first-key", "second-key"]')
+    mock_http(monkeypatch, lambda request: httpx.Response(status, json={"error": {"message": "Fixture error"}}))
+    with pytest.raises(PipelineError, match=f"HTTP {status}"):
+        Providers(store).image("A scene.")
+    assert len(store.manifest.usage) == 1
+
+
+@pytest.mark.parametrize("ceiling,expected_requests", [(0.15, 1), (0.3, 2)])
+def test_fallback_reserves_each_request_against_budget(store, monkeypatch, ceiling, expected_requests):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["gemini-key"]')
+    store.config.spending_ceiling_usd = ceiling
+    store.config.request_cost_caps_usd = {"image": 0.1}
+    def handler(request):
+        if request.url.host == "openrouter.ai":
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        return httpx.Response(200, json=gemini_response(png()))
+    mock_http(monkeypatch, handler)
+    if expected_requests == 1:
+        with pytest.raises(PipelineError, match="Spending ceiling"):
+            Providers(store).image("A scene.")
+    else:
+        assert Providers(store).image("A scene.") == png()
+    assert len(store.manifest.usage) == expected_requests
+    assert all(entry["reserved_upper_bound_usd"] == 0.1 for entry in store.manifest.usage)
+
+
+def test_fallback_images_are_cached_and_fallback_model_changes_invalidate_only_images(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["first-key"]')
+    store.manifest.cues = [Cue(id="cue_0001", text="A scene.", start=0, end=1, word_start=0, word_end=2,
+                              scene_description="A scientist at a table.")]
+    atomic_bytes(store.path("audio/narration.wav"), b"existing voiceover")
+    voice_hash = file_hash(store.path("audio/narration.wav"))
+    requests = []
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "openrouter.ai":
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        return httpx.Response(200, json=gemini_response(png()))
+    mock_http(monkeypatch, handler)
+    Pipeline(store).images()
+    assert len(requests) == 2
+    monkeypatch.setenv("GEMINI_API_KEY", '["replacement-key"]')
+    Pipeline(Store(store.folder, store.config)).images()
+    assert len(requests) == 2
+    store.config.gemini_model = "another-gemini-model"
+    Pipeline(Store(store.folder, store.config)).images()
+    assert len(requests) == 4
+    assert "models/another-gemini-model:generateContent" in str(requests[-1].url)
+    assert file_hash(store.path("audio/narration.wav")) == voice_hash
+
+
+def test_adding_fallback_preserves_existing_primary_image_checkpoints(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    store.manifest.cues = [Cue(id="cue_0001", text="A scene.", start=0, end=1, word_start=0, word_end=2,
+                              scene_description="A scientist at a table.")]
+    mock_http(monkeypatch, lambda request: httpx.Response(200, json=image_response(png())))
+    Pipeline(store).images()
+    stage = store.manifest.stages["image.cue_0001"]
+    legacy_settings = {key: value for key, value in store.config.image_cache_settings.items() if key != "gemini_fallback_model"}
+    stage.input_hash = digest({"prompt": "A scientist at a table.\n" + STYLE, "image_generation": legacy_settings})
+    store.save()
+    before = file_hash(store.path("images/cue_0001.png"))
+    mock_http(monkeypatch, lambda request: pytest.fail("Existing approved image must remain cached"))
+    resumed = Store(store.folder, store.config)
+    Pipeline(resumed).images()
+    assert file_hash(store.path("images/cue_0001.png")) == before
+    assert resumed.manifest.stages["image.cue_0001"].attempts == 1
+
+
+def test_doctor_reports_optional_pool_without_requiring_it(store, monkeypatch, capsys):
+    for name in store.config.generation_keys:
+        monkeypatch.setenv(name, "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["first-secret", "second-secret"]')
+    monkeypatch.setattr(media, "run", lambda command: "version")
+    assert doctor(store.config) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["image_fallback"] == {"provider": "gemini", "model": store.config.gemini_model, "configured_keys": 2}
+    assert "first-secret" not in json.dumps(report)
+    store.config.image_provider = "gemini"
+    monkeypatch.setenv("GEMINI_API_KEY", "[]")
+    assert doctor(store.config) == 1
+    assert not json.loads(capsys.readouterr().out)["checks"]["GEMINI_API_KEY"]
+
+
+def test_credit_fallback_recovery_preserves_completed_images_and_voiceover(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", '["gemini-key"]')
+    store.manifest.cues = [Cue(id=f"cue_{index:04}", text="A scene.", start=index-1, end=index,
+        word_start=index-1, word_end=index, scene_description=f"Scene {index}.") for index in range(1, 4)]
+    atomic_bytes(store.path("audio/narration.wav"), b"existing voiceover")
+    voice_hash = file_hash(store.path("audio/narration.wav"))
+    requests, replenished = [], [False]
+    def handler(request):
+        requests.append(request)
+        if request.url.host == "openrouter.ai":
+            if replenished[0] or json.loads(request.content)["prompt"].startswith("Scene 1."):
+                return httpx.Response(200, json=image_response(png()))
+            return httpx.Response(402, json={"error": {"message": "Insufficient credits"}})
+        return httpx.Response(429, json={"error": {"status": "RESOURCE_EXHAUSTED"}})
+    mock_http(monkeypatch, handler)
+    with pytest.raises(TemporaryError, match="Gemini API keys exhausted"):
+        Pipeline(store).images()
+    assert len(requests) == 4
+    first_hash = file_hash(store.path("images/cue_0001.png"))
+    resumed = Store(store.folder, store.config)
+    with pytest.raises(PipelineError, match="retry limit reached"):
+        Pipeline(resumed).images()
+    assert len(requests) == 4
+    replenished[0] = True
+    resumed.manifest.stages["image.cue_0002"].attempts = 0
+    resumed.save()
+    Pipeline(resumed).images()
+    assert len(requests) == 6
+    assert all(request.url.host == "openrouter.ai" for request in requests[-2:])
+    assert file_hash(store.path("images/cue_0001.png")) == first_hash
+    assert file_hash(store.path("audio/narration.wav")) == voice_hash
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_legacy_cache_adoption_preserves_attempt_limits_and_artifact_checks(store, monkeypatch, corrupt):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    cue = Cue(id="cue_0001", text="A scene.", start=0, end=1, word_start=0, word_end=2, scene_description="A scientist.")
+    store.manifest.cues = [cue]
+    legacy_settings = {key: value for key, value in store.config.image_cache_settings.items() if key != "gemini_fallback_model"}
+    inputs = {"prompt": "A scientist.\n" + STYLE, "image_generation": legacy_settings}
+    def old_image():
+        if not corrupt:
+            raise TemporaryError("Fixture quota exhausted")
+        atomic_bytes(store.path("images/cue_0001.png"), png())
+        return {"files": ["images/cue_0001.png"]}
+    if corrupt:
+        store.task("image.cue_0001", inputs, old_image)
+        atomic_bytes(store.path("images/cue_0001.png"), b"corrupt-image")
+        mock_http(monkeypatch, lambda request: httpx.Response(200, json=image_response(png())))
+    else:
+        with pytest.raises(TemporaryError):
+            store.task("image.cue_0001", inputs, old_image)
+        mock_http(monkeypatch, lambda request: pytest.fail("Persisted attempt limit must survive cache adoption"))
+    resumed = Store(store.folder, store.config)
+    if corrupt:
+        Pipeline(resumed).images()
+        assert media.check_image(store.path("images/cue_0001.png"))["width"] == 640
+        assert len(resumed.manifest.usage) == 1
+    else:
+        with pytest.raises(PipelineError, match="retry limit reached"):
+            Pipeline(resumed).images()
+        assert resumed.manifest.stages["image.cue_0001"].attempts == store.config.max_attempts
+        assert resumed.manifest.usage == []
+
+
+def test_direct_gemini_empty_pool_stops_cli_before_requests(store, monkeypatch, tmp_path, capsys):
+    store.config.image_provider = "gemini"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "fixture-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "[]")
+    settings = tmp_path / "config.json"
+    settings.write_text(store.config.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(Pipeline, "run", lambda pipeline: pytest.fail("Empty pool must fail setup"))
+    assert main(["--config", str(settings), "run", "--mode", "topic", "Empty pool", "--job-id", "empty"]) == 1
+    assert "GEMINI_API_KEY" in capsys.readouterr().err
+    assert read_json(store.config.jobs_dir / "empty/manifest.json")["usage"] == []
