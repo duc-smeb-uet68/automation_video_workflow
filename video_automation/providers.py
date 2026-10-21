@@ -101,6 +101,45 @@ class Providers:
         self.store = store
         self.config = store.config
 
+    @staticmethod
+    def error_details(response, headers) -> dict:
+        """Keep bounded provider diagnostics without recording request credentials."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        error = body.get("error", body.get("detail", body)) if isinstance(body, dict) else {}
+        metadata = error.get("metadata", {}) if isinstance(error, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        upstream = metadata.get("raw", {})
+        if isinstance(upstream, str):
+            try:
+                upstream = json.loads(upstream)
+            except ValueError:
+                upstream = {"message": upstream} if not upstream.lstrip().startswith("<") else {}
+        if isinstance(upstream, dict):
+            upstream = upstream.get("error", upstream.get("detail", upstream))
+        details = {"provider_name": metadata.get("provider_name"),
+                   "request_id": response.headers.get("request-id") or response.headers.get("x-request-id")}
+        for node, prefix in ((error, ""), (upstream, "upstream_")):
+            if isinstance(node, str):
+                details[prefix + "message"] = node
+            elif isinstance(node, dict):
+                for field in ("message", "code", "status", "type"):
+                    details[prefix + field] = node.get(field)
+        secrets = {value for value in headers.values() if isinstance(value, str) and value}
+        secrets.update(value.partition(" ")[2] for value in list(secrets) if value.lower().startswith("bearer "))
+        secrets.update(value for name in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY")
+                       if (value := os.environ.get(name)))
+        safe = {}
+        for field, value in details.items():
+            if isinstance(value, (str, int)):
+                value = str(value)
+                for secret in sorted(secrets, key=len, reverse=True):
+                    value = value.replace(secret, "[REDACTED]")
+                safe[field] = " ".join(value.split())[:1000]
+        return safe
+
     def post(self, operation: str, url: str, headers: dict, payload: dict, params=None) -> dict:
         entry = self.store.reserve_request(operation)
         entry["provider"] = urlparse(url).hostname
@@ -109,12 +148,20 @@ class Providers:
             with httpx.Client(timeout=self.config.request_timeout_seconds) as client:
                 response = client.post(url, headers=headers, json=payload, params=params)
             entry["http_status"] = response.status_code
-            if response.status_code in {408, 409, 425, 429} or response.status_code >= 500:
-                entry["status"] = "temporary_failure"
-                raise TemporaryError(f"{operation}: temporary HTTP {response.status_code}")
             if not response.is_success:
-                entry["status"] = "failed"
-                raise PipelineError(f"{operation}: HTTP {response.status_code}; check credentials, model access and provider quota")
+                temporary = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+                entry["status"] = "temporary_failure" if temporary else "failed"
+                details = self.error_details(response, headers)
+                name = f"responses/{operation}_{digest(payload)[:12]}_{len(self.store.manifest.usage):04}_error.json"
+                write_json(self.store.path(name), {"http_status": response.status_code, "error": details})
+                entry["response_path"] = name
+                if details.get("request_id"):
+                    entry["request_id"] = details["request_id"]
+                reasons = list(dict.fromkeys(details[field] for field in
+                    ("status", "type", "message", "upstream_status", "upstream_message") if details.get(field)))
+                reason = "; ".join(reasons) or "Provider returned no structured error details"
+                error_type = TemporaryError if temporary else PipelineError
+                raise error_type(f"{operation}: {'temporary ' if temporary else ''}HTTP {response.status_code}: {reason}")
             try:
                 data = response.json()
             except ValueError as exc:

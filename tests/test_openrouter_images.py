@@ -11,7 +11,7 @@ from video_automation.cli import doctor, main
 from video_automation.models import Config, Cue, Manifest
 from video_automation.pipeline import Pipeline
 from video_automation.providers import Providers, STYLE
-from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, file_hash
+from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, file_hash, read_json
 
 
 def png(color="#fffaf0"):
@@ -204,3 +204,65 @@ def test_image_provider_is_part_of_cache_key():
     config.image_provider = "gemini"
     config.gemini_model = config.openrouter_image_model
     assert before != config.image_cache_settings
+
+
+def test_image_http_400_keeps_redacted_upstream_reason_and_request_id(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-openrouter-key")
+    body = {"error": {"code": 400, "message": "Provider returned error", "metadata": {
+        "provider_name": "Google", "raw": json.dumps({"error": {"status": "INVALID_ARGUMENT",
+            "message": "Gemini could not generate an image (STOP); credential=fixture-openrouter-key"}})}}}
+    calls = []
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(400, json=body, headers={"x-request-id": "request-image-fixture"})
+    mock_http(monkeypatch, handler)
+    with pytest.raises(PipelineError, match=r"Gemini could not generate an image \(STOP\)") as error:
+        Providers(store).image("A scene.", [])
+    assert not isinstance(error.value, TemporaryError)
+    assert calls == [1]
+    entry = store.manifest.usage[-1]
+    assert entry["status"] == "failed" and entry["http_status"] == 400
+    assert entry["request_id"] == "request-image-fixture"
+    saved = read_json(store.path(entry["response_path"]))
+    assert saved["http_status"] == 400
+    assert saved["error"]["provider_name"] == "Google"
+    assert saved["error"]["upstream_status"] == "INVALID_ARGUMENT"
+    assert "[REDACTED]" in saved["error"]["upstream_message"]
+    assert "fixture-openrouter-key" not in str(error.value)
+    assert "fixture-openrouter-key" not in store.path(entry["response_path"]).read_text(encoding="utf-8")
+    assert "fixture-openrouter-key" not in store.path("manifest.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("status,body,message", [
+    (402, {"detail": {"status": "payment_required", "message": "Free users cannot use library voices via the API"}}, "payment_required"),
+    (400, {"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Invalid reference image"}}, "Invalid reference image"),
+    (429, {"error": "Slow down"}, "Slow down"),
+])
+def test_provider_http_errors_include_structured_reason_without_changing_retry_policy(store, monkeypatch, status, body, message):
+    mock_http(monkeypatch, lambda request: httpx.Response(status, json=body))
+    expected = TemporaryError if status == 429 else PipelineError
+    with pytest.raises(expected, match=message):
+        Providers(store).post("image", "https://example.org/image", {"Authorization": "Bearer fixture-secret"}, {})
+    entry = store.manifest.usage[-1]
+    assert entry["status"] == ("temporary_failure" if status == 429 else "failed")
+    assert store.path(entry["response_path"]).is_file()
+
+
+def test_http_error_sanitizes_header_and_environment_secrets_before_truncation(store, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "another-fixture-secret")
+    body = {"error": {"message": "Bearer fixture-header-secret another-fixture-secret " + "x"*3000}}
+    mock_http(monkeypatch, lambda request: httpx.Response(400, json=body))
+    with pytest.raises(PipelineError) as error:
+        Providers(store).post("image", "https://example.org/image", {"Authorization": "Bearer fixture-header-secret"}, {})
+    saved = store.path(store.manifest.usage[-1]["response_path"]).read_text(encoding="utf-8")
+    for secret in ("fixture-header-secret", "another-fixture-secret"):
+        assert secret not in str(error.value) and secret not in saved
+    assert len(read_json(store.path(store.manifest.usage[-1]["response_path"]))["error"]["message"]) <= 1000
+
+
+def test_non_json_http_error_saves_status_without_echoing_response_body(store, monkeypatch):
+    mock_http(monkeypatch, lambda request: httpx.Response(400, text="<html>private debug body</html>"))
+    with pytest.raises(PipelineError, match="HTTP 400") as error:
+        Providers(store).post("image", "https://example.org/image", {}, {})
+    saved = store.path(store.manifest.usage[-1]["response_path"]).read_text(encoding="utf-8")
+    assert "private debug body" not in str(error.value) and "private debug body" not in saved

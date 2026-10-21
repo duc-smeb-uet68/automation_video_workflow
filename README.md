@@ -109,6 +109,8 @@ Each input receives a stable job directory, `jobs/video_<input-hash>/`. Topic mo
 
 Raw responses and intermediates are retained for recovery and diagnosis. They may contain the narration and source content. A previous failure report is historical; the manifest and newest quality report identify current status.
 
+HTTP failures save selected, redacted provider error fields and any available request ID in `responses/*_error.json`. The CLI includes the provider message and nested upstream reason when available. Request-header values and configured provider keys are redacted before fields are limited to 1,000 characters; non-JSON response bodies are not echoed. This diagnostic output does not change which HTTP failures receive automatic retries.
+
 ## Resume and retries
 
 ```powershell
