@@ -1,0 +1,20 @@
+{
+  "jobs_dir": "jobs",
+  "ffmpeg": "ffmpeg",
+  "ffprobe": "ffprobe",
+  "text_provider": "openrouter",
+  "openrouter_model": "openai/gpt-oss-120b",
+  "openai_model": "gpt-4.1",
+  "gemini_model": "gemini-2.5-flash-image",
+  "elevenlabs_model": "eleven_multilingual_v2",
+  "voice_id": "",
+  "width": 1920,
+  "height": 1080,
+  "fps": 30,
+  "max_attempts": 3,
+  "image_interval_seconds": 1,
+  "music_path": null,
+  "character_reference": null,
+  "spending_ceiling_usd": null,
+  "request_cost_caps_usd": {}
+}
