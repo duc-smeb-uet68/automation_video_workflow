@@ -174,7 +174,7 @@ class Pipeline:
     def images(self):
         store, manifest = self.store, self.store.manifest
         custom_reference = self.config.character_reference
-        reference_key = digest({"characters": CHARACTERS, "style": STYLE, "model": self.config.gemini_model})
+        reference_key = digest({"characters": CHARACTERS, "style": STYLE, "image_generation": self.config.image_cache_settings})
         shared = self.config.jobs_dir / "references" / f"characters_{reference_key[:16]}.png"
         reference_inputs = {"key": reference_key, "custom": file_hash(custom_reference) if custom_reference else None}
 
@@ -204,7 +204,7 @@ class Pipeline:
                 references.append(group_references[cue.scene_group])
             prompt = (f"Characters in this scene: {', '.join(cue.character_ids) or 'none'}. "
                       f"Scene group: {cue.scene_group}. {cue.scene_description}")
-            inputs = {"prompt": prompt, "style": STYLE, "model": self.config.gemini_model,
+            inputs = {"prompt": prompt, "style": STYLE, "image_generation": self.config.image_cache_settings,
                       "references": [file_hash(p) for p in references]}
 
             def generate(relative=relative, references=references, prompt=prompt):

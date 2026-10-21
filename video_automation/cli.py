@@ -56,7 +56,8 @@ def doctor(config):
     checks["music_file"] = not config.music_path or config.music_path.is_file()
     checks["character_reference"] = not config.character_reference or config.character_reference.is_file()
     print(json.dumps({"ready_for_live_generation": all(checks.values()),
-                      "text_provider": config.text_provider, "text_model": config.text_model, "checks": checks}, indent=2))
+                      "text_provider": config.text_provider, "text_model": config.text_model,
+                      "image_provider": config.image_provider, "image_model": config.image_model, "checks": checks}, indent=2))
     return 0 if all(checks.values()) else 1
 
 

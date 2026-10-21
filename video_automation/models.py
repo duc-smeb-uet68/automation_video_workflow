@@ -19,7 +19,9 @@ class Config(Record):
     text_provider: Literal["openrouter", "openai"] = "openrouter"
     openrouter_model: str = Field(default="openai/gpt-oss-120b", min_length=1)
     openai_model: str = "gpt-4.1"
-    gemini_model: str = "gemini-2.5-flash-image"
+    image_provider: Literal["openrouter", "gemini"] = "openrouter"
+    openrouter_image_model: str = Field(default="google/gemini-3.1-flash-lite-image", min_length=1)
+    gemini_model: str = "gemini-3.1-flash-lite-image"
     elevenlabs_model: str = "eleven_multilingual_v2"
     voice_id: str = ""
     voice_settings: dict = Field(default_factory=lambda: {
@@ -52,12 +54,25 @@ class Config(Record):
         return "OPENROUTER_API_KEY" if self.text_provider == "openrouter" else "OPENAI_API_KEY"
 
     @property
+    def image_model(self) -> str:
+        return self.openrouter_image_model if self.image_provider == "openrouter" else self.gemini_model
+
+    @property
+    def image_key_env(self) -> str:
+        return "OPENROUTER_API_KEY" if self.image_provider == "openrouter" else "GEMINI_API_KEY"
+
+    @property
     def generation_keys(self) -> tuple[str, ...]:
-        return (self.text_key_env, "ELEVENLABS_API_KEY", "GEMINI_API_KEY")
+        return tuple(dict.fromkeys((self.text_key_env, "ELEVENLABS_API_KEY", self.image_key_env)))
 
     @property
     def text_cache_settings(self) -> dict:
         return {"provider": self.text_provider, "model": self.text_model, "adapter_version": 1}
+
+    @property
+    def image_cache_settings(self) -> dict:
+        return {"provider": self.image_provider, "model": self.image_model, "adapter_version": 1,
+                "resolution": "1K", "aspect_ratio": "16:9"}
 
     @model_validator(mode="after")
     def frame_shape(self):

@@ -1,5 +1,6 @@
 import json
 
+import httpx
 import pytest
 
 from video_automation import media
@@ -25,7 +26,7 @@ def test_openrouter_default_and_model_selection():
     config = Config()
     assert config.text_provider == "openrouter"
     assert config.text_model == "openai/gpt-oss-120b"
-    assert config.generation_keys == ("OPENROUTER_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY")
+    assert config.generation_keys == ("OPENROUTER_API_KEY", "ELEVENLABS_API_KEY")
     config.openrouter_model = "provider/custom-model"
     assert config.text_model == "provider/custom-model"
     config.text_provider = "openai"
@@ -93,6 +94,116 @@ def test_openrouter_research_requires_retrieved_citations(store, monkeypatch):
         client.research("A topic")
 
 
+@pytest.mark.parametrize("invented", [False, True])
+def test_openrouter_research_formats_prose_without_repeating_search(store, monkeypatch, invented):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    citation = {"type": "url_citation", "url": "https://example.org/study", "title": "Study",
+                "content": "Observed care was shared among camp members."}
+    raw = response(None, [citation])
+    raw["output"][0]["content"][0]["text"] = "## Evidence\nCamp members shared childcare."
+    raw["output"].insert(0, {"type": "openrouter:web_search", "action": {"sources": [{"url": citation["url"]}]}})
+    result = {"summary": "Evidence", "sources": [{"url": "https://example.org/invented" if invented else citation["url"],
+              "title": "Study", "supported_claims": ["Camp members shared childcare."]}]}
+    requests = []
+    def post(operation, url, headers, payload):
+        requests.append((operation, url, payload))
+        return raw if len(requests) == 1 else response(result, [{"type": "url_citation", "url": result["sources"][0]["url"]}])
+    monkeypatch.setattr(client, "post", post)
+    if invented:
+        with pytest.raises(PipelineError, match="not retrieved"):
+            client.research("Caregivers")
+    else:
+        assert client.research("Caregivers")["retrieved_urls"] == [citation["url"]]
+    assert len(requests) == 2
+    operation, endpoint, payload = requests[1]
+    assert operation == "research" and endpoint == "https://openrouter.ai/api/v1/responses"
+    assert payload["model"] == store.config.text_model
+    assert "tools" not in payload and "tool_choice" not in payload
+    assert payload["text"]["format"]["strict"] is True
+    prompt = payload["input"][1]["content"][0]["text"]
+    assert citation["content"] in prompt and raw["output"][1]["content"][0]["text"] in prompt.replace("\\n", "\n")
+    assert "supported_claims" in prompt and "JSON" in prompt
+
+
+@pytest.mark.parametrize("formatted,error", [
+    (None, "missing or invalid structured output"),
+    ({"summary": "Missing sources"}, "structured output violates schema"),
+])
+def test_openrouter_research_formatting_is_bounded(store, monkeypatch, formatted, error):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    raw = response(None, [{"type": "url_citation", "url": "https://example.org/study"}])
+    raw["output"][0]["content"][0]["text"] = "Research prose, not JSON."
+    requests = []
+    def post(*args):
+        requests.append(args)
+        return raw if len(requests) == 1 or formatted is None else response(formatted)
+    monkeypatch.setattr(client, "post", post)
+    with pytest.raises(PipelineError, match=error):
+        client.research("Caregivers")
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("tool_type", ["web_search_call", "openrouter:web_search"])
+def test_research_accepts_search_action_provenance_without_annotations(store, monkeypatch, tool_type):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    result = {"summary": "Evidence", "sources": [{"url": "https://example.org/study", "title": "Study",
+              "supported_claims": ["Camp members shared childcare."]}]}
+    raw = response(result)
+    raw["output"].insert(0, {"type": tool_type, "action": {"sources": [{"url": "https://example.org/study/"}]}})
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: raw)
+    assert client.research("Caregivers")["retrieved_urls"] == ["https://example.org/study"]
+
+
+@pytest.mark.parametrize("content,error", [
+    ({"type": "output_text", "text": "Prose with no retrieved sources."}, "no verifiable retrieved"),
+    ({"type": "refusal", "refusal": "Fixture refusal."}, "refused"),
+    ({"type": "output_text", "text": ""}, "missing or invalid structured output"),
+])
+def test_openrouter_research_does_not_reformat_missing_evidence_or_refusals(store, monkeypatch, content, error):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    requests = []
+    def post(*args):
+        requests.append(args)
+        return {"status": "completed", "output": [{"type": "message", "content": [content]}]}
+    monkeypatch.setattr(client, "post", post)
+    with pytest.raises(PipelineError, match=error):
+        client.research("Caregivers")
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("ceiling", [0.15, 0.3])
+def test_research_formatting_reserves_budget_and_retains_raw_responses(store, monkeypatch, ceiling):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    store.config.spending_ceiling_usd = ceiling
+    store.config.request_cost_caps_usd = {"research": 0.1}
+    raw = response(None, [{"type": "url_citation", "url": "https://example.org/study"}])
+    raw["output"][0]["content"][0]["text"] = "Camp members shared childcare."
+    formatted = response({"summary": "Evidence", "sources": [{"url": "https://example.org/study",
+                         "title": "Study", "supported_claims": ["Camp members shared childcare."]}]})
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=raw if len(requests) == 1 else formatted)
+    original_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=transport, **kwargs))
+    if ceiling < 0.2:
+        with pytest.raises(PipelineError, match="Spending ceiling"):
+            Providers(store).research("Caregivers")
+        assert len(requests) == len(store.manifest.usage) == 1
+    else:
+        assert Providers(store).research("Caregivers")["summary"] == "Evidence"
+        assert len(requests) == len(store.manifest.usage) == 2
+        assert read_json(store.path(store.manifest.usage[1]["response_path"])) == formatted
+    assert read_json(store.path(store.manifest.usage[0]["response_path"])) == raw
+    assert all(entry["operation"] == "research" and entry["reserved_upper_bound_usd"] == 0.1
+               for entry in store.manifest.usage)
+
+
 @pytest.mark.parametrize("result", [{"narration": "missing sources"}, {"narration": 42, "source_references": []},
                                    {"narration": "text", "source_references": [], "extra": "unexpected"}])
 def test_routed_output_must_pass_local_schema(store, monkeypatch, result):
@@ -117,6 +228,7 @@ def test_openrouter_incomplete_response_fails_clearly(store, monkeypatch):
 ])
 def test_doctor_requires_only_selected_text_key(store, monkeypatch, capsys, provider, selected, unused):
     store.config.text_provider = provider
+    store.config.image_provider = "gemini"
     monkeypatch.setattr(media, "run", lambda command: "version")
     monkeypatch.delenv(unused, raising=False)
     for name in store.config.generation_keys:

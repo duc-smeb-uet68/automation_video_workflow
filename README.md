@@ -12,7 +12,7 @@ python -m video_automation init
 Copy-Item .env.example .env
 ```
 
-Fill `.env` locally with `OPENROUTER_API_KEY`, `ELEVENLABS_API_KEY`, and `GEMINI_API_KEY`. OpenRouter is the default text provider, using exactly `openai/gpt-oss-120b`. Set `voice_id` in `config.local.json` to an ElevenLabs voice available to your account. Existing process environment variables take precedence over `.env`. The loader supports simple `KEY=value` lines, optionally quoted; it does not expand shell expressions. Keys are never stored in the manifest or execution log.
+Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRouter is the default provider for both text (`openai/gpt-oss-120b`) and images (`google/gemini-3.1-flash-lite-image`). One OpenRouter key covers both stages; no `GEMINI_API_KEY` is required with these defaults. Set `voice_id` in `config.local.json` to an ElevenLabs voice available to your account. Existing process environment variables take precedence over `.env`. The loader supports simple `KEY=value` lines, optionally quoted; it does not expand shell expressions. Keys are never stored in the manifest or execution log.
 
 `init` detects the existing `D:/kenlive/bin` FFmpeg installation when the tools are not on PATH. All other installations can set executable paths in configuration. Relative music, font, reference, and jobs paths resolve against the configuration file's directory. `config.local.json` loads automatically when running from this directory; `--config` selects another setup file. `config.example.json` documents the main settings.
 
@@ -40,11 +40,30 @@ Add the actual key locally to the existing `.env` file:
 OPENROUTER_API_KEY=your_openrouter_key
 ```
 
-Change `openrouter_model` to select a different compatible OpenRouter model. Requests use OpenRouter's Responses endpoint with strict JSON schemas and `provider.require_parameters=true`; responses also undergo local JSON Schema validation. Research uses the `openrouter:web_search` server tool with Exa, at most three searches, five results per search, and 15 total results. Retrieved citations remain mandatory. Model and search charges use your OpenRouter account. This integration does not route speech or image generation through OpenRouter.
+Change `openrouter_model` to select a different compatible OpenRouter text model. Requests use OpenRouter's Responses endpoint with strict JSON schemas and `provider.require_parameters=true`; responses also undergo local JSON Schema validation. Research uses the `openrouter:web_search` server tool with Exa, at most three searches, five results per search, and 15 total results. Retrieved citations remain mandatory. Model and search charges use your OpenRouter account. Speech generation still uses ElevenLabs.
 
-OpenAI remains an optional direct provider. Set `text_provider` to `openai`, configure `openai_model` (default `gpt-4.1`), and fill `OPENAI_API_KEY`. The setup check requires only the selected text provider's key, plus the ElevenLabs and Gemini keys. It prints the active provider and model without revealing credentials. There is no automatic provider fallback.
+Some routed search responses contain prose despite the requested JSON format. When cited prose is returned, the adapter makes one additional request to the same model to format the existing evidence as JSON, without search tools. The formatted result must pass the original schema and use only URLs retrieved by the search response. Refusals, empty responses, and missing source evidence stop immediately. Both requests remain in the usage ledger and raw response files; each reserves the configured `research` request cost cap when a spending ceiling is set. Only one formatting pass is allowed per search response; normal bounded stage retries still apply.
+
+OpenAI remains an optional direct text provider. Set `text_provider` to `openai`, configure `openai_model` (default `gpt-4.1`), and fill `OPENAI_API_KEY`. Setup checks require the selected text and image providers' keys plus the ElevenLabs key, deduplicating a shared OpenRouter key. They print both active providers and models without revealing credentials. There is no automatic application-level provider fallback.
 
 Provider and model are included in generation cache keys. Changing either invalidates the affected text stages and their dependent artifacts; existing imported-video exports remain available. A compatible schema/tool route and valid account access are required. Offline tests verify the adapter contract; a live request is still required to verify account-specific availability.
+
+## Image provider and model
+
+The active setup in `config.local.json` uses:
+
+```json
+{
+  "image_provider": "openrouter",
+  "openrouter_image_model": "google/gemini-3.1-flash-lite-image"
+}
+```
+
+Image requests use OpenRouter's dedicated `POST /api/v1/images` API and the same `OPENROUTER_API_KEY` as text generation. Each request asks for one 1K image at 16:9. Character and scene references are sent as base64 data URLs in `input_references`. Returned base64 raster images pass the existing file/dimension checks before being checkpointed. Usage and available cost data are retained in the manifest. Missing, empty, malformed, or invalid images receive bounded retries; successful images and voiceover remain cached.
+
+Change `openrouter_image_model` to choose another image model that supports reference images and the configured resolution/aspect ratio. Image settings have their own cache keys, including provider and model. Changing them regenerates affected images and references without invalidating unchanged research, narration, speech, or visual planning. Existing media artifacts remain in their job folders until replaced by their regenerated outputs.
+
+Direct Gemini remains optional: set `image_provider` to `gemini`, set `gemini_model` to an available Google image model, and supply `GEMINI_API_KEY`. Its current code default is `gemini-3.1-flash-lite-image`; an older local setup may retain a previous `gemini_model` value and should update it before selecting direct Gemini. OpenRouter image generation does not use that field or require a separate Google account/key. Live model access and available credits must still be verified with your OpenRouter account.
 
 ## Artifacts
 
@@ -140,6 +159,8 @@ The final acceptance step remains an unattended **live** topic-to-video run with
 - [OpenRouter web search server tool](https://openrouter.ai/docs/guides/features/server-tools/web-search)
 - [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)
 - [Requested default: openai/gpt-oss-120b](https://openrouter.ai/openai/gpt-oss-120b)
+- [OpenRouter Image API and reference images](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
+- [Requested image model: google/gemini-3.1-flash-lite-image](https://openrouter.ai/google/gemini-3.1-flash-lite-image)
 - [OpenAI Docs: structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 - [OpenAI Docs: web search](https://developers.openai.com/api/docs/guides/tools-web-search)
 - [ElevenLabs speech with timing](https://elevenlabs.io/docs/api-reference/text-to-speech/convert-with-timestamps/)
