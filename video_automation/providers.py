@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -74,6 +75,25 @@ AUDIT_SCHEMA = object_schema({"sentences": {"type": "array", "items": object_sch
 VISUAL_SCHEMA = object_schema({"cues": {"type": "array", "items": object_schema({
     "id": STRING, "scene_group": STRING, "character_ids": STRINGS, "scene_description": STRING,
     "overlay_text": {"type": ["string", "null"]}, "motion": {"type": "string", "enum": ["hold", "slow_push"]}})}})
+
+
+def validate_visual_plan(cues, plan):
+    """Validate generated and cached plans before approving a batch checkpoint."""
+    try:
+        Draft202012Validator(VISUAL_SCHEMA).validate(plan)
+    except ValidationError as exc:
+        location = ".".join(str(part) for part in exc.absolute_path) or "root"
+        raise TemporaryError(f"Visual plan violates schema at {location} ({exc.validator})") from exc
+    expected = [cue.id for cue in cues]
+    actual = [record["id"] for record in plan["cues"]]
+    if actual != expected:
+        raise TemporaryError("Visual plan must cover every cue ID exactly once in order "
+                             f"(expected {len(expected)} cues; received {len(actual)})")
+    for record in plan["cues"]:
+        if not record["scene_group"].strip() or not record["scene_description"].strip():
+            raise TemporaryError(f"Empty visual description or scene group: {record['id']}")
+        if not set(record["character_ids"]) <= {"parent", "infant", "caregiver"}:
+            raise TemporaryError(f"Unknown shared character ID: {record['id']}")
 
 
 class Providers:
@@ -277,5 +297,21 @@ class Providers:
         prompt = (VISUAL_PROMPT + "\n"
                   + "Previous scenes for continuity: " + json.dumps(previous_scenes or []) + "\n"
                   + json.dumps([{"id": c.id, "text": c.text} for c in cues]))
-        result, _ = self.structured("visuals", prompt, VISUAL_SCHEMA)
+        schema = deepcopy(VISUAL_SCHEMA)
+        array = schema["properties"]["cues"]
+        array.update(minItems=len(cues), maxItems=len(cues))
+        properties = array["items"]["properties"]
+        properties["id"] = {"type": "string", "enum": [cue.id for cue in cues]}
+        properties["character_ids"] = {"type": "array", "items": {
+            "type": "string", "enum": ["parent", "infant", "caregiver"]}}
+        for field in ("scene_group", "scene_description"):
+            properties[field] = {"type": "string", "minLength": 1}
+        try:
+            result, _ = self.structured("visuals", prompt, schema)
+        except PipelineError as exc:
+            # Malformed visual output can be regenerated within the stage's retry budget.
+            if isinstance(exc.__cause__, (json.JSONDecodeError, ValidationError)):
+                raise TemporaryError(str(exc)) from exc
+            raise
+        validate_visual_plan(cues, result)
         return result

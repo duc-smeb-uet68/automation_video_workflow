@@ -11,7 +11,7 @@ from PIL import Image
 
 from . import media
 from .models import Cue, Manifest, Script
-from .providers import AUDIT_PROMPT, CHARACTERS, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers
+from .providers import AUDIT_PROMPT, CHARACTERS, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import aligned_words, make_script, normalize, segment_words
 
@@ -48,9 +48,21 @@ class Pipeline:
             atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
         return cls(store)
 
-    def json_task(self, name, inputs, relative, action):
+    def json_task(self, name, inputs, relative, action, validate=None):
+        previous = self.store.manifest.stages.get(name)
+        if validate and previous and previous.status == "completed" and previous.input_hash == digest(inputs):
+            try:
+                validate(previous.result.get("data"))
+            except TemporaryError as exc:
+                # Older checkpoints may have been saved before semantic validation existed.
+                previous.status = "failed"
+                previous.errors.append(str(exc))
+                self.store.save()
+                self.store.log("cache_rejected", stage=name, error=str(exc))
         def save():
             data = action()
+            if validate:
+                validate(data)
             write_json(self.store.path(relative), data)
             return {"files": [relative], "data": data}
         return self.store.task(name, inputs, save)["data"]
@@ -154,7 +166,8 @@ class Pipeline:
                                      "previous_scenes": previous_scenes,
                                      "text_generation": self.config.text_cache_settings, "style": STYLE, "prompt": VISUAL_PROMPT},
                                      f"visuals/batch_{offset//24:03}.json",
-                                     lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes))
+                                     lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes),
+                                     validate=lambda planned, batch=batch: validate_visual_plan(batch, planned))
             records.extend(planned["cues"])
         if [r["id"] for r in records] != [c.id for c in cues]:
             raise PipelineError("Visual plan must cover every cue ID exactly once in order")
@@ -162,10 +175,6 @@ class Pipeline:
             for field in ("scene_group", "character_ids", "scene_description", "overlay_text", "motion"):
                 setattr(cue, field, record[field])
             Cue.model_validate(cue.model_dump())
-            if not cue.scene_group.strip() or not cue.scene_description.strip():
-                raise PipelineError(f"Empty visual description or scene group: {cue.id}")
-            if not set(cue.character_ids) <= {"parent", "infant", "caregiver"}:
-                raise PipelineError(f"Unknown shared character ID: {cue.id}")
             if cue.overlay_text:
                 cue.motion = "hold"
         manifest.cues = cues

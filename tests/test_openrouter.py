@@ -5,10 +5,10 @@ import pytest
 
 from video_automation import media
 from video_automation.cli import doctor, load_credentials, main
-from video_automation.models import Config, Manifest
+from video_automation.models import Config, Cue, Manifest
 from video_automation.pipeline import Pipeline
-from video_automation.providers import Providers, SCRIPT_SCHEMA
-from video_automation.store import PipelineError, Store, read_json
+from video_automation.providers import Providers, SCRIPT_SCHEMA, VISUAL_SCHEMA
+from video_automation.store import PipelineError, Store, TemporaryError, read_json
 
 
 @pytest.fixture
@@ -290,3 +290,69 @@ def test_text_provider_and_model_changes_invalidate_generation_cache(store):
     store.config.text_provider = "openai"
     store.task("script", store.config.text_cache_settings, action)
     assert len(calls) == 3
+
+
+@pytest.fixture
+def visual_cues():
+    return [Cue(id=f"cue_{index:04}", text="A scene.", start=index-25, end=index-24,
+                word_start=index-25, word_end=index-24) for index in (25, 26)]
+
+
+@pytest.fixture
+def visual_plan(visual_cues):
+    return {"cues": [{"id": cue.id, "scene_group": "camp", "character_ids": ["parent"],
+                      "scene_description": "A parent by the fire.", "overlay_text": None, "motion": "hold"}
+                     for cue in visual_cues]}
+
+
+@pytest.mark.parametrize("provider,key", [("openrouter", "OPENROUTER_API_KEY"), ("openai", "OPENAI_API_KEY")])
+def test_visual_request_schema_constrains_batch_without_mutating_shared_schema(store, monkeypatch, visual_cues, visual_plan, provider, key):
+    store.config.text_provider = provider
+    monkeypatch.setenv(key, "fixture-key")
+    client = Providers(store)
+    before = json.dumps(VISUAL_SCHEMA, sort_keys=True)
+    requests = []
+    def post(operation, url, headers, payload):
+        requests.append(payload)
+        return response(visual_plan)
+    monkeypatch.setattr(client, "post", post)
+    assert client.visuals(visual_cues) == visual_plan
+    schema = requests[0]["text"]["format"]["schema"]["properties"]["cues"]
+    assert schema["minItems"] == schema["maxItems"] == 2
+    assert schema["items"]["properties"]["id"]["enum"] == ["cue_0025", "cue_0026"]
+    assert "enum" not in schema["items"]["properties"]["scene_description"]
+    assert json.dumps(VISUAL_SCHEMA, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "reordered", "character", "blank", "json"])
+def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_cues, visual_plan, invalid):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    if invalid == "count":
+        visual_plan["cues"].pop()
+    elif invalid == "id":
+        visual_plan["cues"][0]["id"] = "..."
+    elif invalid == "duplicate":
+        visual_plan["cues"][1]["id"] = "cue_0025"
+    elif invalid == "reordered":
+        visual_plan["cues"].reverse()
+    elif invalid == "character":
+        visual_plan["cues"][0]["character_ids"] = ["unknown"]
+    elif invalid == "blank":
+        visual_plan["cues"][0]["scene_group"] = " "
+    output = response(visual_plan)
+    if invalid == "json":
+        output["output"][0]["content"][0]["text"] = "not JSON"
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: output)
+    with pytest.raises(TemporaryError):
+        client.visuals(visual_cues)
+
+
+def test_visual_refusal_remains_non_retryable(store, monkeypatch, visual_cues):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    output = {"status": "completed", "output": [{"type": "message", "content": [{"type": "refusal"}]}]}
+    monkeypatch.setattr(client, "post", lambda *args: output)
+    with pytest.raises(PipelineError, match="refused") as error:
+        client.visuals(visual_cues)
+    assert not isinstance(error.value, TemporaryError)

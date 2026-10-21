@@ -573,3 +573,103 @@ def test_existing_manifest_resumes_topic_workflow_despite_script_default(store, 
     with pytest.raises(PipelineError, match="required 4500"):
         Pipeline(restored, provider).run()
     assert provider.calls == ["research", "script", "revision"]
+
+
+def visual_words(store, count=200):
+    store.manifest.audio_duration = count
+    return [Word(text=f"word{i}.", start=i, end=i+0.5, char_start=i*10, char_end=i*10+8,
+                 sentence_id=f"sentence_{i}") for i in range(count)]
+
+
+@pytest.mark.parametrize("invalid", ["missing", "duplicate", "unexpected", "reordered", "blank", "character", "schema"])
+def test_visual_batch_retries_invalid_plan_before_checkpoint(store, invalid):
+    provider = FakeProviders()
+    original = provider.visuals
+    def visuals(cues, previous_scenes=None):
+        result = original(cues, previous_scenes)
+        if provider.calls.count("visuals") == 1:
+            if invalid == "missing":
+                result["cues"].pop()
+            elif invalid == "duplicate":
+                result["cues"][-1]["id"] = result["cues"][0]["id"]
+            elif invalid == "unexpected":
+                result["cues"][-1]["id"] = "..."
+            elif invalid == "reordered":
+                result["cues"].reverse()
+            elif invalid == "blank":
+                result["cues"][0]["scene_description"] = " "
+            elif invalid == "character":
+                result["cues"][0]["character_ids"] = ["unknown"]
+            else:
+                del result["cues"][0]["motion"]
+        return result
+    provider.visuals = visuals
+    words = visual_words(store, 8)
+    Pipeline(store, provider).visuals(words)
+    stage = store.manifest.stages["visuals.000"]
+    assert stage.status == "completed" and stage.attempts == 2
+    assert provider.calls == ["visuals", "visuals"]
+    assert [c["id"] for c in read_json(store.path("transcript.json"))] == ["cue_0001", "cue_0002"]
+
+
+def test_invalid_visual_plan_exhausts_retries_without_completed_checkpoint(store):
+    provider = FakeProviders()
+    original = provider.visuals
+    def visuals(cues, previous_scenes=None):
+        result = original(cues, previous_scenes)
+        result["cues"] = result["cues"][:1]
+        result["cues"][0]["id"] = "..."
+        return result
+    provider.visuals = visuals
+    words = visual_words(store, 8)
+    with pytest.raises(TemporaryError, match="every cue ID"):
+        Pipeline(store, provider).visuals(words)
+    stage = store.manifest.stages["visuals.000"]
+    assert stage.status == "failed" and stage.attempts == store.config.max_attempts
+    assert not store.path("visuals/batch_000.json").exists()
+    assert not store.path("transcript.json").exists()
+    with pytest.raises(PipelineError, match="retry limit reached"):
+        Pipeline(Store(store.folder, store.config), provider).visuals(words)
+    assert provider.calls == ["visuals"] * store.config.max_attempts
+
+
+def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store):
+    from video_automation.providers import STYLE, VISUAL_PROMPT
+    words = visual_words(store)
+    cues = segment_words(words, store.config.fps, store.manifest.audio_duration)
+    seed = FakeProviders()
+    pipeline = Pipeline(store, seed)
+    records = []
+    for offset in range(0, len(cues), 24):
+        batch = cues[offset:offset+24]
+        previous_scenes = records[-3:]
+        planned = seed.visuals(batch, previous_scenes)
+        if offset == 24:
+            planned["cues"] = planned["cues"][:2]
+            for record in planned["cues"]:
+                record["id"] = "..."
+        pipeline.json_task(f"visuals.{offset//24:03}", {"cues": [c.model_dump() for c in batch],
+                           "previous_scenes": previous_scenes, "text_generation": store.config.text_cache_settings,
+                           "style": STYLE, "prompt": VISUAL_PROMPT}, f"visuals/batch_{offset//24:03}.json", lambda: planned)
+        records.extend(planned["cues"])
+    atomic_bytes(store.path("audio/narration.wav"), b"completed narration")
+    atomic_bytes(store.path("alignment.json"), b"completed alignment")
+    atomic_bytes(store.path("responses/visuals_bad.json"), b"preserved provider response")
+    preserved = {path: file_hash(store.path(path)) for path in (
+        "audio/narration.wav", "alignment.json", "visuals/batch_000.json", "responses/visuals_bad.json")}
+    provider = FakeProviders()
+    requested = []
+    original = provider.visuals
+    def visuals(batch, previous_scenes=None):
+        requested.append(batch[0].id)
+        return original(batch, previous_scenes)
+    provider.visuals = visuals
+    resumed = Pipeline(Store(store.folder, store.config), provider)
+    resumed.visuals(words)
+    assert requested == ["cue_0025", "cue_0049"]
+    assert resumed.store.manifest.stages["visuals.000"].attempts == 1
+    assert resumed.store.manifest.stages["visuals.001"].attempts == 2
+    assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
+    assert [c.id for c in resumed.store.manifest.cues] == [c.id for c in cues]
+    resumed.visuals(words)
+    assert requested == ["cue_0025", "cue_0049"]
