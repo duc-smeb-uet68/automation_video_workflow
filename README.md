@@ -109,11 +109,28 @@ Each input receives a stable experimental job directory, `jobs/video_text_only_<
 | `final.mp4`, `subtitles.en.srt` | H.264/AAC MP4 and separate subtitles |
 | `quality_report.json`, `audio_measurements.json` | Validation and audio measurements |
 | `execution.jsonl`, `responses/` | Execution events and raw provider responses |
+| `progress.json` | Latest workflow phase, completed phase count, task/attempt, batch/image/clip counts, cache reuse, timestamps, and terminal status |
 | `failure_report.json` | Most recent failed run, when present |
 
 Raw responses and intermediates are retained for recovery and diagnosis. They may contain the narration and source content. A previous failure report is historical; the manifest and newest quality report identify current status.
 
 HTTP failures save selected, redacted provider error fields and any available request ID in `responses/*_error.json`. The CLI includes the provider message and nested upstream reason when available. Request-header values and configured provider keys are redacted before fields are limited to 1,000 characters; non-JSON response bodies are not echoed. This diagnostic output does not change which HTTP failures receive automatic retries.
+
+## Workflow progress
+
+`run`, `resume`, `fixture`, and `import-assets` show live progress on stderr. Stdout retains the final JSON result. Generated jobs have seven phases: narration preparation, speech, visual planning, image generation, clip rendering, audio finishing, and validation. Fixture and imported jobs have the final three phases. Research, drafting, optional revision, and source auditing appear as tasks within narration preparation.
+
+Progress shows the active task, attempt limit, cached tasks, and completed batches, images, or clips when their totals are known. Cue-derived totals remain dynamic. Counts describe completed work rather than estimated time remaining; phases have different costs and durations. Clip counts do not mark rendering complete until rough-cut assembly also finishes. Completion is reported only after validation passes.
+
+Each phase transition and checkpoint event updates the job's atomic `progress.json` snapshot. Inspect it from another terminal while the worker runs:
+
+```powershell
+python -m video_automation status video_text_only_JOB_HASH
+```
+
+`status` also accepts a job folder or manifest path. It reads saved progress and the authoritative manifest status without acquiring the worker lock, making generation requests, or modifying files. Jobs predating progress tracking return their manifest status with `progress_available: false`. Snapshots include an update timestamp and elapsed seconds for the current invocation. During a long provider or FFmpeg call, the last reported task remains active. Abrupt process termination may leave a running status until the next resume.
+
+On resume, cached stages and cue checkpoints are verified and reported as reused work; the phase counters describe that invocation. Failure and interruption preserve the last phase and completed counts. If saving a progress snapshot fails, the CLI warns once and continues using normal workflow checkpoints. A disconnected progress stream does not cause generation retries.
 
 ## Resume and retries
 

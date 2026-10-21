@@ -9,6 +9,7 @@ from pathlib import Path
 from . import assets, media
 from .models import Config
 from .pipeline import Pipeline
+from .progress import read_progress
 from .store import PipelineError, Store, worker_lock, write_json
 
 
@@ -75,6 +76,8 @@ def main(argv=None):
     resume = commands.add_parser("resume", help="Resume an existing job with successful checkpoints preserved")
     resume.add_argument("job")
     resume.add_argument("--retry-failed", action="store_true", help="Explicitly grant failed stages one new bounded retry batch")
+    status = commands.add_parser("status", help="Read saved workflow progress without taking the worker lock")
+    status.add_argument("job")
     validation = commands.add_parser("validate", help="Validate final video and write quality_report.json")
     validation.add_argument("job")
     test = commands.add_parser("fixture", help="Render a portable synthetic smoke test without provider calls")
@@ -103,6 +106,9 @@ def main(argv=None):
             return 0
         if args.command == "doctor":
             return doctor(config)
+        if args.command == "status":
+            print(json.dumps(read_progress(job_folder(config, args.job)), indent=2))
+            return 0
         with worker_lock(config.jobs_dir):
             if args.command == "run":
                 mode = args.mode or config.input_mode
@@ -153,6 +159,7 @@ def main(argv=None):
                     store.log("explicit_retry_batch")
                     store.save()
                 pipeline = Pipeline(store)
+            pipeline.store.progress_stream = sys.stderr
             pipeline.run()
             print(json.dumps({"status": pipeline.store.manifest.status, "mode": pipeline.store.manifest.mode,
                               "video": str(pipeline.store.path("final.mp4")), "subtitles": str(pipeline.store.path("subtitles.en.srt")),

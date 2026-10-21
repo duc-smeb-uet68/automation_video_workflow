@@ -412,7 +412,16 @@ def test_production_orchestration_and_resume_with_offline_contracts(store, monke
 
 
 @pytest.mark.parametrize("mode", ["production", "script"])
-def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode):
+def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, monkeypatch):
+    import video_automation.progress as tracking
+    snapshots = []
+    original_write = tracking.write_json
+
+    def capture(path, content):
+        snapshots.append(json.loads(json.dumps(content)))
+        original_write(path, content)
+
+    monkeypatch.setattr(tracking, "write_json", capture)
     provider = FakeProviders()
     if mode == "script":
         path = tmp_path / "narration.txt"
@@ -427,6 +436,15 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode):
     assert store.path("subtitles.en.srt").is_file()
     assert store.manifest.total_frames == 240
     assert report["mode"] == mode
+    progress = read_json(store.path("progress.json"))
+    assert progress["status"] == "completed"
+    assert progress["completed_phases"] == progress["total_phases"] == 7
+    assert list(dict.fromkeys(snapshot["phase"] for snapshot in snapshots)) == [
+        "narration", "speech", "visuals", "images", "render", "finish", "validate"]
+    for phase, total in (("visuals", (len(store.manifest.cues)+23)//24),
+                         ("images", len(store.manifest.cues)), ("render", len(store.manifest.cues))):
+        completed = [snapshot for snapshot in snapshots if snapshot["phase"] == phase and snapshot["phase_status"] == "completed"][-1]
+        assert completed["completed_units"] == completed["total_units"] == total
     if mode == "script":
         assert report["details"]["source_audit"] == "Skipped: narration supplied by the user."
         assert not {"research", "script", "revision", "audit"} & set(provider.calls)

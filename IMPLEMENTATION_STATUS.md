@@ -2,6 +2,16 @@
 
 Verified on 2026-10-21. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
 
+## Workflow progress tracking
+
+The CLI reports live phase and checkpoint progress on stderr while retaining its final JSON result on stdout. Generated jobs track seven phases; fixture and imported jobs track rendering, finishing, and validation. Dynamic counters cover visual batches, images, and clips, with cached work and bounded attempts reported separately. Atomic `progress.json` snapshots record the active phase/task, counts, timestamps, elapsed time, and completion, failure, or interruption. Snapshots do not affect generation cache inputs or manifest schemas.
+
+The read-only `status JOB_ID` command also accepts job folders and manifest paths. Tests verify that status remains available while the worker lock is held and does not change job file contents or modification times. Historical manifests without progress snapshots remain readable. Reporting failures, including an unwritable snapshot or disconnected terminal, do not repeat successful work or consume another attempt. Resuming an exhausted task reports the actual blocked task without making another request.
+
+Focused progress contracts pass **11 tests** in **2.21 seconds**, using `.venv/Scripts/python.exe -m pytest -q tests/test_progress.py -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/progress-contracts`. An earlier focused run passed **12 tests** in **41.57 seconds**, including both real script/topic MP4 integrations with all seven phases and exact cue-derived batch, image, and clip counts. No live provider requests or retained user-job modifications were made during verification.
+
+The complete offline suite passes **157 tests** in **72.78 seconds**, run with `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/progress-full`. This includes existing provider, recovery, budget, timing, overlay, Kdenlive, and real FFmpeg integration checks. CLI help includes the new status command, and whitespace validation passes.
+
 ## Transparent text overlays
 
 The label renderer previously painted a cream rounded rectangle with alpha 245/255 behind text. That panel caused the background color mismatch shown in the user's screenshot. Labels now contain only red text on a fully transparent RGBA canvas, retaining the existing font, wrapping, positioning, and antialiased glyph edges.

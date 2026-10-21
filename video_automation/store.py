@@ -87,6 +87,8 @@ class Store:
         if self.manifest.mode in {"production", "script"} and self.manifest.image_strategy != "text_only":
             raise PipelineError("Legacy reference-based job is preserved; create a new text-only job on this branch "
                                 "or use main to continue the existing job")
+        self.progress = None
+        self.progress_stream = None
         self.folder.mkdir(parents=True, exist_ok=True)
         self.save()
 
@@ -102,6 +104,8 @@ class Store:
     def log(self, event: str, **details):
         with (self.folder / "execution.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"time": time.time(), "event": event, **details}) + "\n")
+        if self.progress is not None:
+            self.progress.on_event(event, details)
 
     def task(self, name: str, inputs, action):
         key = digest(inputs)
@@ -137,6 +141,7 @@ class Store:
                 if not isinstance(exc, TemporaryError) or stage.attempts >= self.config.max_attempts:
                     raise
                 time.sleep(min(30, self.config.retry_backoff_seconds * 2 ** (stage.attempts - 1)))
+        self.log("stage_exhausted", stage=name, attempt=stage.attempts)
         raise PipelineError(f"{name}: retry limit reached; use resume --retry-failed for an explicit new retry batch")
 
     def reserve_request(self, operation: str):

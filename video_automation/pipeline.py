@@ -11,6 +11,7 @@ from PIL import Image
 
 from . import media
 from .models import Cue, Manifest, Script
+from .progress import WorkflowProgress
 from .providers import AUDIT_PROMPT, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import aligned_words, make_script, normalize, segment_words
@@ -157,6 +158,8 @@ class Pipeline:
     def visuals(self, words):
         store, manifest = self.store, self.store.manifest
         cues = segment_words(words, self.config.fps, manifest.audio_duration)
+        if store.progress is not None:
+            store.progress.set_total((len(cues) + 23) // 24, "batches")
         # Bounded batches prevent an entire long video from exceeding structured-output limits.
         records = []
         for offset in range(0, len(cues), 24):
@@ -231,25 +234,40 @@ class Pipeline:
         store, manifest = self.store, self.store.manifest
         manifest.status, manifest.error = "running", None
         store.save()
+        phases = (["narration", "speech", "visuals", "images"] if manifest.mode in {"production", "script"} else [])
+        progress = WorkflowProgress(store, phases + ["render", "finish", "validate"])
+        store.progress = progress
         try:
             if manifest.mode in {"production", "script"}:
-                script = self.script()
-                words = self.speech(script)
-                self.visuals(words)
-                self.images()
-            media.render(store)
-            media.finish(store)
-            report = media.validate(store)
+                with progress.phase("narration"):
+                    script = self.script()
+                with progress.phase("speech"):
+                    words = self.speech(script)
+                with progress.phase("visuals"):
+                    self.visuals(words)
+                with progress.phase("images"):
+                    self.images()
+            with progress.phase("render"):
+                media.render(store)
+            with progress.phase("finish"):
+                media.finish(store)
+            with progress.phase("validate"):
+                report = media.validate(store)
             manifest.status = "completed"
             store.save()
+            progress.finish("completed")
             return report
         except KeyboardInterrupt:
             manifest.status, manifest.error = "interrupted", "Interrupted; completed checkpoints are preserved"
             store.save()
+            progress.finish("interrupted", manifest.error)
             raise
         except Exception as exc:
             manifest.status, manifest.error = "failed", str(exc)
             store.save()
             write_json(store.path("failure_report.json"), {"error": str(exc), "stage_status": {
                 k: {"status": v.status, "attempts": v.attempts, "errors": v.errors} for k, v in manifest.stages.items()}})
+            progress.finish("failed", manifest.error)
             raise
+        finally:
+            store.progress = None
