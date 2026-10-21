@@ -2,7 +2,15 @@
 
 Verified on 2026-10-21. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
 
-## Text-only image generation experiment
+## Transparent text overlays
+
+The label renderer previously painted a cream rounded rectangle with alpha 245/255 behind text. That panel caused the background color mismatch shown in the user's screenshot. Labels now contain only red text on a fully transparent RGBA canvas, retaining the existing font, wrapping, positioning, and antialiased glyph edges.
+
+Overlay checkpoints now include renderer version 2. Image generation, video rendering, and Kdenlive export share the same label-refresh path. Resuming a job refreshes older overlay PNGs and affected video outputs while reusing unchanged scene images, narration, and unaffected clips. Existing encoded videos require a rerender to apply the change.
+
+Six transparency/compositing regression cases failed before the fix and passed afterward. Focused overlay/editor checks passed **14 tests** in **4.35 seconds**. The full offline suite, including added 1920×1080 coverage, passes **146 tests** in **64.28 seconds**, run with `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/transparent-full`. Checks cover glyph-only alpha at 640×360 and 1920×1080, long wrapped labels, exact background preservation across three colors, cache upgrades without new image/speech requests, Kdenlive prepared images, and real FFmpeg rerendering. A decoded final-video frame preserves a background sample within four RGB levels, and a subsequent cached rerun keeps the final MP4 hash unchanged. The decoded fixture frame was visually inspected and shows text without a panel. No live provider requests were made, and no retained user jobs were rerendered during verification.
+
+## Text-only image generation experiment (initial verification)
 
 Branch `codex/text-only-image-prompts` replaces reference-based generation with standalone text prompts. Visual planning retains the doodle style while selecting characters appropriate to the narration and repeating appearance details in scene descriptions. The pipeline checkpoints the complete ordered `{cue_id, prompt}` list in `image_prompts.json` before the first image request. Mocked requests confirm that OpenRouter and direct Gemini receive exactly the saved prompt text without image attachments. The pipeline no longer creates or reads character-reference images. Legacy `character_reference` configuration remains accepted and is ignored by setup and generation.
 

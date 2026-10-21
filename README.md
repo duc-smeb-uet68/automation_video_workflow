@@ -135,6 +135,8 @@ Visual cues follow aligned words and sentence boundaries. Their count is dynamic
 
 The doodle style lives in code. Characters and appearance descriptions are chosen from the narration and repeated in standalone prompts. This branch neither creates nor reads character-reference or scene-reference images. Only `hold` and a centered 1.5% `slow_push` are supported. Overlay scenes remain stationary. Image checks cover file validity, dimensions, and coverage; artistic correctness is outside this MVP.
 
+Text overlays are RGBA PNGs containing only red text. Every pixel outside the text is fully transparent; no background panel, shadow, or border is drawn. Overlay checkpoints include a renderer version. Resuming a job refreshes older label PNGs and their dependent video clips without regenerating unchanged scene images or speech. Renderer fixtures and Kdenlive exports refresh labels through the same checkpoint path. Already encoded MP4 files change only when the job is rendered again.
+
 Audio finishing uses two-pass loudness normalization. Optional local music loops, fades, and ducks under speech. Validation decodes the final file and checks image coverage, text coverage, timeline continuity, frame count, format, duration agreement within one frame, caption bounds, overlay bounds, peaks, and long silences in both narration and final audio. Failed validation writes a report and marks the job failed.
 
 ## Cost controls

@@ -7,7 +7,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .media import prepare_image
+from .media import ensure_overlay, prepare_image
 from .store import PipelineError, atomic_bytes
 from .timing import assign_frames
 
@@ -66,7 +66,7 @@ def export(store, template: Path):
     for index, cue in enumerate(manifest.cues, 1):
         count = cue.end_frame-cue.start_frame
         prepared = store.path(f"render/prepared/{cue.id}.png")
-        prepare_image(config, store.path(cue.image_path), prepared, store.path(cue.overlay_path) if cue.overlay_path else None)
+        prepare_image(config, store.path(cue.image_path), prepared, ensure_overlay(store, cue))
         producer = copy.deepcopy(original)
         producer_id = f"image_{index:04}"
         producer.set("id", producer_id)

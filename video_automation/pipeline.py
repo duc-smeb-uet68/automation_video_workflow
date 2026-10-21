@@ -224,14 +224,7 @@ class Pipeline:
 
             store.task(f"image.{cue.id}", inputs, generate)
             cue.image_path = relative
-            if cue.overlay_text:
-                overlay_relative = f"overlays/{cue.id}.png"
-                def labels(cue=cue, overlay_relative=overlay_relative):
-                    result = media.overlay(self.config, cue.overlay_text, store.path(overlay_relative))
-                    return {"files": [overlay_relative], "layout": result}
-                store.task(f"overlay.{cue.id}", {"text": cue.overlay_text, "width": self.config.width,
-                           "height": self.config.height, "font": file_hash(self.config.font_path) if self.config.font_path else "system-default-v1"}, labels)
-                cue.overlay_path = overlay_relative
+            media.ensure_overlay(store, cue)
             store.save()
 
     def run(self):

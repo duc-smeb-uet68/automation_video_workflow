@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from video_automation import assets, media
 from video_automation.models import Config, Cue, Manifest, Word
@@ -472,6 +472,11 @@ def test_kdenlive_export_uses_dynamic_manifest(config, tmp_path):
     from video_automation.kdenlive import export, properties
     import xml.etree.ElementTree as ET
     pipeline = assets.fixture(config, "editor")
+    # A label from an older fixture must be refreshed before preparing editor images.
+    cue = pipeline.store.manifest.cues[-1]
+    with Image.open(pipeline.store.path(cue.overlay_path)) as labels:
+        ImageDraw.Draw(labels).rectangle((8, 8, 100, 40), fill=(255, 250, 235, 245))
+        labels.save(pipeline.store.path(cue.overlay_path))
     template = tmp_path / "template.kdenlive"
     template.write_text('''<mlt><profile/>
       <producer id="black"><property name="resource">black</property></producer>
@@ -489,6 +494,8 @@ def test_kdenlive_export_uses_dynamic_manifest(config, tmp_path):
     chain = root.find("chain")
     assert properties(chain)["resource"] == pipeline.store.path("audio/narration.wav").as_posix()
     assert all(Path(properties(p)["resource"]).is_file() for p in images)
+    with Image.open(pipeline.store.path(f"render/prepared/{cue.id}.png")) as prepared, Image.open(pipeline.store.path(cue.image_path)) as original:
+        assert prepared.getpixel((32, 32)) == original.getpixel((32, 32))
 
 
 def test_env_file_only_reads_provider_keys(tmp_path, monkeypatch):
@@ -520,6 +527,112 @@ def test_cli_missing_setup_fails_before_requests(config, tmp_path, monkeypatch):
 def test_overlay_rejects_unfit_text(config, tmp_path):
     with pytest.raises(PipelineError, match="does not fit"):
         media.overlay(config, "x"*1000, tmp_path/"bad.png")
+
+
+@pytest.mark.parametrize("text", ["38%", "Re-think: food ≠ abandoning baby", "Longer label with several words across multiple lines " * 3])
+@pytest.mark.parametrize("size", [(640, 360), (1920, 1080)])
+def test_overlay_has_only_text_on_transparent_pixels(config, tmp_path, text, size):
+    config.width, config.height = size
+    path = tmp_path / "label.png"
+    result = media.overlay(config, text, path)
+    with Image.open(path) as labels:
+        assert labels.mode == "RGBA"
+        assert labels.size == (config.width, config.height)
+        assert labels.getbbox() == tuple(result["bounds"])
+        visible = [pixel for pixel in labels.getdata() if pixel[3] > 0]
+        assert visible
+        assert {pixel[:3] for pixel in visible} == {(160, 25, 20)}
+        assert labels.getchannel("A").getextrema() == (0, 255)
+
+
+@pytest.mark.parametrize("background", ["#fffaf0", "#143860", "#28b369"])
+def test_overlay_composition_preserves_background_outside_text(config, tmp_path, background):
+    source, overlay, prepared = (tmp_path / name for name in ("source.png", "label.png", "prepared.png"))
+    Image.new("RGB", (config.width, config.height), background).save(source)
+    media.overlay(config, "38%", overlay)
+    media.prepare_image(config, source, prepared, overlay)
+    with Image.open(overlay) as labels, Image.open(source) as original, Image.open(prepared) as combined:
+        for label, before, after in zip(labels.getdata(), original.getdata(), combined.getdata()):
+            if label[3] == 0:
+                assert after == before
+            elif label[3] == 255:
+                assert after == (160, 25, 20)
+
+
+def test_overlay_cache_upgrade_preserves_generated_images_and_speech(store):
+    provider = FakeProviders()
+    cue = Cue(id="cue_0001", text="Exact overlay: 38%", start=0, end=1, word_start=0, word_end=3,
+              scene_description="A scientist with a blue coat beside a lab bench.", overlay_text="38%")
+    store.manifest.cues = [cue]
+    pipeline = Pipeline(store, provider)
+    pipeline.images()
+    atomic_bytes(store.path("audio/narration.wav"), b"saved speech")
+    original_hashes = {name: file_hash(store.path(name)) for name in (cue.image_path, "audio/narration.wav")}
+    with Image.open(store.path(cue.overlay_path)) as labels:
+        ImageDraw.Draw(labels).rectangle((8, 8, 100, 40), fill=(255, 250, 235, 245))
+        labels.save(store.path(cue.overlay_path))
+    legacy_inputs = {"text": cue.overlay_text, "width": store.config.width, "height": store.config.height,
+                     "font": "system-default-v1"}
+    stage = store.manifest.stages[f"overlay.{cue.id}"]
+    stage.input_hash = digest(legacy_inputs)
+    stage.artifacts[cue.overlay_path] = file_hash(store.path(cue.overlay_path))
+    store.save()
+    resumed = Pipeline(Store(store.folder, store.config), provider)
+    resumed.images()
+    with Image.open(store.path(cue.overlay_path)) as labels:
+        assert labels.getpixel((32, 32))[3] == 0
+    assert provider.calls == ["image"]
+    assert original_hashes == {name: file_hash(store.path(name)) for name in original_hashes}
+    before = file_hash(store.path(cue.overlay_path))
+    resumed.images()
+    assert file_hash(store.path(cue.overlay_path)) == before
+    assert resumed.store.manifest.stages[f"overlay.{cue.id}"].attempts == 1
+
+
+def test_cached_video_refreshes_old_overlay_and_preserves_background(config, monkeypatch, tmp_path):
+    pipeline = assets.fixture(config, "transparent_overlay")
+    provider = FakeProviders()
+    pipeline.providers = provider
+    cue = pipeline.store.manifest.cues[-1]
+    original_overlay = media.overlay
+
+    def legacy_overlay(settings, text, output):
+        result = original_overlay(settings, text, output)
+        panel = Image.new("RGBA", (settings.width, settings.height))
+        ImageDraw.Draw(panel).rounded_rectangle((8, 8, settings.width-8, 100), radius=12, fill=(255, 250, 235, 245))
+        with Image.open(output) as labels:
+            panel = Image.alpha_composite(panel, labels)
+        panel.save(output)
+        return {**result, "bounds": list(panel.getbbox())}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(media, "overlay", legacy_overlay)
+        assert pipeline.run()["passed"]
+    store = pipeline.store
+    old_overlay_hash = file_hash(store.path(cue.overlay_path))
+    old_video_hash = file_hash(store.path("final.mp4"))
+    preserved = {name: file_hash(store.path(name)) for name in (
+        "audio/narration.wav", *(c.image_path for c in store.manifest.cues), "render/clips/cue_0001.mp4", "render/clips/cue_0002.mp4")}
+    # Reproduce a completed checkpoint from before overlay renderer versioning.
+    store.manifest.stages[f"overlay.{cue.id}"].input_hash = digest({
+        "text": cue.overlay_text, "width": config.width, "height": config.height, "font": "system-default-v1"})
+    store.save()
+    resumed = Pipeline(Store(store.folder, config), provider)
+    assert resumed.run()["passed"]
+    assert file_hash(store.path(cue.overlay_path)) != old_overlay_hash
+    assert file_hash(store.path("final.mp4")) != old_video_hash
+    assert preserved == {name: file_hash(store.path(name)) for name in preserved}
+    assert provider.calls == []
+    with Image.open(store.path(cue.overlay_path)) as labels:
+        assert labels.getpixel((32, 32))[3] == 0
+    frame = tmp_path / "transparent_overlay_frame.png"
+    media.ffmpeg(config, "-loglevel", "error", "-ss", "2.5", "-i", store.path("final.mp4"),
+                 "-frames:v", 1, "-threads", 1, frame)
+    with Image.open(frame) as decoded, Image.open(store.path(cue.image_path)) as original:
+        assert max(abs(a-b) for a, b in zip(decoded.convert("RGB").getpixel((32, 32)), original.getpixel((32, 32)))) <= 4
+    final_hash = file_hash(store.path("final.mp4"))
+    assert resumed.run()["passed"]
+    assert file_hash(store.path("final.mp4")) == final_hash
 
 
 def test_script_mode_normalizes_skips_research_and_resumes_from_snapshot(config, tmp_path, monkeypatch):

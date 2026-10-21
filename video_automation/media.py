@@ -13,6 +13,9 @@ from .store import PipelineError, atomic_bytes, file_hash, write_json
 from .timing import assign_frames, normalize, subtitles
 
 
+OVERLAY_VERSION = 2
+
+
 def run(command: list[str]) -> str:
     result = subprocess.run([str(v) for v in command], capture_output=True, text=True,
                             encoding="utf-8", errors="replace")
@@ -83,11 +86,9 @@ def overlay(config, text: str, output: Path) -> dict:
         raise PipelineError("Overlay text does not fit in the configured frame")
     if not wrapped:
         raise PipelineError("Overlay text is empty")
-    box_width, box_height = box[2] - box[0], box[3] - box[1]
+    box_width = box[2] - box[0]
     left = (width - box_width) // 2
     top = margin * 2
-    draw.rounded_rectangle((left-margin, top-margin, left+box_width+margin, top+box_height+margin),
-                           radius=12, fill=(255, 250, 235, 245))
     draw.multiline_text((left-box[0], top-box[1]), wrapped, font=font, fill=(160, 25, 20, 255), spacing=6, align="center")
     bounds = canvas.getbbox()
     if not bounds or not (0 <= bounds[0] < bounds[2] <= width and 0 <= bounds[1] < bounds[3] <= height):
@@ -95,6 +96,25 @@ def overlay(config, text: str, output: Path) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(output)
     return {"text": text, "bounds": list(bounds)}
+
+
+def ensure_overlay(store, cue: Cue) -> Path | None:
+    """Refresh cached labels when their text, font, dimensions, or renderer changes."""
+    if cue.overlay_text:
+        config = store.config
+        relative = cue.overlay_path or f"overlays/{cue.id}.png"
+
+        def labels():
+            result = overlay(config, cue.overlay_text, store.path(relative))
+            return {"files": [relative], "layout": result}
+
+        store.task(f"overlay.{cue.id}", {"text": cue.overlay_text, "width": config.width,
+                   "height": config.height, "font": file_hash(config.font_path) if config.font_path else "system-default-v1",
+                   "overlay_version": OVERLAY_VERSION}, labels)
+        if cue.overlay_path != relative:
+            cue.overlay_path = relative
+            store.save()
+    return store.path(cue.overlay_path) if cue.overlay_path else None
 
 
 def prepare_image(config, source: Path, destination: Path, overlay_path: Path | None):
@@ -117,7 +137,7 @@ def render(store):
         image = store.path(cue.image_path)
         check_image(image)
         clip_relative = f"render/clips/{cue.id}.mp4"
-        overlay_path = store.path(cue.overlay_path) if cue.overlay_path else None
+        overlay_path = ensure_overlay(store, cue)
         inputs = {"image": file_hash(image), "overlay": file_hash(overlay_path) if overlay_path else None,
                   "frames": cue.end_frame-cue.start_frame, "motion": cue.motion,
                   "settings": config.model_dump(include={"width", "height", "fps", "crf", "encoder_preset"})}
