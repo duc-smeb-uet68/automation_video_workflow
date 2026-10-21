@@ -23,20 +23,29 @@ class Pipeline:
         self.providers = providers or Providers(store)
 
     @classmethod
-    def create(cls, config, topic: str, job_id: str | None = None):
-        topic = topic.strip()
+    def create(cls, config, topic: str | None = None, job_id: str | None = None, *, script_path: Path | None = None):
+        script = make_script(script_path.read_text(encoding="utf-8-sig")) if script_path is not None else None
+        mode = "script" if script is not None else "production"
+        script_input_hash = digest(script.narration) if script is not None else None
+        topic = (topic or (script_path.stem if script_path is not None else "")).strip()
         if not topic:
             raise PipelineError("Topic cannot be empty")
-        job_id = job_id or "video_" + digest(topic)[:12]
+        identity = {"mode": mode, "narration": script.narration} if script is not None else topic
+        job_id = job_id or "video_" + digest(identity)[:12]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
             raise PipelineError("Job ID must contain only letters, digits, underscores and hyphens")
         folder = config.jobs_dir / job_id
         if (folder / "manifest.json").is_file():
             store = Store(folder, config)
-            if store.manifest.topic != topic or store.manifest.mode != "production":
-                raise PipelineError("Existing job has a different topic or mode; choose another job ID")
+            if (store.manifest.mode != mode
+                    or (script is None and store.manifest.topic != topic)
+                    or (script is not None and store.manifest.script_input_hash != script_input_hash)):
+                raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID")
         else:
-            store = Store(folder, config, Manifest(job_id=job_id, topic=topic, fps=config.fps))
+            store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
+                                                  script_input_hash=script_input_hash, fps=config.fps))
+        if script is not None:
+            atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
         return cls(store)
 
     def json_task(self, name, inputs, relative, action):
@@ -48,6 +57,11 @@ class Pipeline:
 
     def script(self) -> Script:
         store, manifest = self.store, self.store.manifest
+        if manifest.mode == "script":
+            narration = store.path("input_script.txt").read_text(encoding="utf-8")
+            if digest(narration) != manifest.script_input_hash:
+                raise PipelineError("Saved input script hash mismatch; rerun with the original narration file to restore it")
+            return self.save_script(make_script(narration))
         research = self.json_task("research", {"topic": manifest.topic, "text_generation": self.config.text_cache_settings, "prompt": RESEARCH_PROMPT},
                                   "sources.json", lambda: self.providers.research(manifest.topic))
         draft = self.json_task("script.draft", {"research": research, "topic": manifest.topic,
@@ -79,9 +93,13 @@ class Pipeline:
                        "text_generation": self.config.text_cache_settings, "prompt": AUDIT_PROMPT}, "source_audit.json", audit)
         script.source_references = sorted(set(script.source_references) | {
             url for record in audit_result["sentences"] for url in record["source_urls"]})
+        return self.save_script(script)
+
+    def save_script(self, script: Script) -> Script:
+        store = self.store
         atomic_bytes(store.path("script.txt"), script.narration.encode("utf-8"))
         write_json(store.path("script.json"), script.model_dump(mode="json"))
-        manifest.script_character_count = script.character_count
+        store.manifest.script_character_count = script.character_count
         store.save()
         return script
 
@@ -229,7 +247,7 @@ class Pipeline:
         manifest.status, manifest.error = "running", None
         store.save()
         try:
-            if manifest.mode == "production":
+            if manifest.mode in {"production", "script"}:
                 script = self.script()
                 words = self.speech(script)
                 self.visuals(words)

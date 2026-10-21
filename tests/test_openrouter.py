@@ -248,7 +248,7 @@ def test_cli_openrouter_preflight_does_not_require_openai_key(store, tmp_path, m
     config_path.write_text(store.config.model_dump_json(), encoding="utf-8")
     calls = []
     monkeypatch.setattr(Pipeline, "run", lambda pipeline: calls.append(pipeline.store.manifest.topic))
-    assert main(["--config", str(config_path), "run", "Preflight fixture", "--job-id", "preflight"]) == 0
+    assert main(["--config", str(config_path), "run", "--mode", "topic", "Preflight fixture", "--job-id", "preflight"]) == 0
     assert calls == ["Preflight fixture"]
 
 
@@ -259,7 +259,7 @@ def test_cli_openai_key_cannot_substitute_for_openrouter(store, tmp_path, monkey
     monkeypatch.setenv("GEMINI_API_KEY", "fixture-key")
     path = tmp_path / "config.json"
     path.write_text(store.config.model_dump_json(), encoding="utf-8")
-    assert main(["--config", str(path), "run", "Missing routed key", "--job-id", "missing"]) == 1
+    assert main(["--config", str(path), "run", "--mode", "topic", "Missing routed key", "--job-id", "missing"]) == 1
     assert "OPENROUTER_API_KEY" in capsys.readouterr().err
     assert read_json(store.config.jobs_dir / "missing/manifest.json")["usage"] == []
 

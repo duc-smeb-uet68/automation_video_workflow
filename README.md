@@ -1,6 +1,6 @@
 # Educational video automation
 
-A Python CLI implements the seven stages in `video_automation_plan.md`: bounded research, a length-gated script, timed speech, visual planning, sequential images, rendering, audio finishing, and validation. Jobs use atomic local manifests. One worker owns the jobs directory at a time. Production uses provider APIs without browser steps.
+A Python CLI turns a supplied narration file into timed speech, visual plans, sequential images, and a validated video. Script-file input is the default. An explicit topic mode also performs bounded research, script generation, and source auditing as described in `video_automation_plan.md`. Jobs use atomic local manifests. One worker owns the jobs directory at a time. Generation uses provider APIs without browser steps.
 
 ## Setup
 
@@ -18,10 +18,31 @@ Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRout
 
 ```powershell
 python -m video_automation doctor
-python -m video_automation run 'Who Watched the Baby While Ancient Humans Hunted?'
+python -m video_automation run .\narration.txt
 ```
 
-The topic is the only per-video content input. Model IDs, voice, style, resolution, retry limits, optional music, and optional character reference are configured once. The selected model IDs are explicit defaults; account access must be checked during setup. The configured speech models all accept the complete 4,500–5,000-character script in one request.
+The narration file is the only per-video content input in the default mode. Model IDs, voice, style, resolution, retry limits, optional music, and optional character reference are configured once. The selected model IDs are explicit defaults; account access must be checked during setup. The configured speech models all accept the complete 4,500–5,000-character script in one request.
+
+## Input modes
+
+Save the final narration as a UTF-8 plain text file, with or without a BOM. Both commands select script mode with the default configuration:
+
+```powershell
+python -m video_automation run .\narration.txt
+python -m video_automation run --script .\narration.txt
+```
+
+Script mode skips research, drafting, length revision, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. It must contain 4,500–5,000 Python Unicode characters after normalization; invalid files stop before generation requests. The normalized text is sent unchanged to ElevenLabs. Exact character alignment, timed transcripts, visual planning, sequential image generation, rendering, and validation still run. The text provider is still required for visual planning.
+
+Each script job stores an `input_script.txt` snapshot and its hash. `resume JOB_ID` reads that snapshot, so moving, editing, or deleting the original file does not change an existing job. Running a changed script creates a different default job. Reusing an explicit `--job-id` with different content or a different mode is rejected. If the saved snapshot is missing or corrupt, rerun with the original narration file and the same job ID to restore it. Input-file paths resolve against the working directory.
+
+For the original research and script workflow, select topic mode explicitly:
+
+```powershell
+python -m video_automation run --mode topic 'Who Watched the Baby While Ancient Humans Hunted?'
+```
+
+`input_mode` defaults to `"script"`, including when an existing configuration omits the field. Set it to `"topic"` to make positional inputs topics again. `--mode` overrides the configured default; `--script` always selects script mode and cannot be combined with a positional input or `--mode topic`. Existing manifests retain their recorded mode when resumed; topic jobs remain labeled `production`, and supplied-script jobs use `script`.
 
 ## Text provider and model
 
@@ -67,15 +88,16 @@ Direct Gemini remains optional: set `image_provider` to `gemini`, set `gemini_mo
 
 ## Artifacts
 
-Each topic receives a stable job directory, such as `jobs/video_<topic-hash>/`. `--job-id` provides an optional administrative name.
+Each input receives a stable job directory, `jobs/video_<input-hash>/`. Topic mode hashes the topic; script mode hashes the normalized narration and its mode. `--job-id` provides an optional administrative name.
 
 | Artifact | Contents |
 | --- | --- |
 | `manifest.json` | Job state, cues, timing, attempts, input hashes, artifact hashes, errors, usage |
-| `sources.json` | Retrieved source URLs and supported claims |
-| `draft.json`, optional `draft_revision.json` | Original script draft and the single permitted length revision |
+| `input_script.txt` | Normalized input snapshot for supplied-script jobs; retained for resume |
+| `sources.json` | Retrieved source URLs and supported claims; topic mode only |
+| `draft.json`, optional `draft_revision.json` | Original script draft and the single permitted length revision; topic mode only |
 | `script.txt`, `script.json` | Exact normalized narration and stable paragraph/sentence IDs |
-| `source_audit.json` | Separate model audit of every sentence's source support |
+| `source_audit.json` | Separate model audit of every sentence's source support; topic mode only |
 | `audio/narration.wav`, `alignment.json` | Final decoded audio and character, word, sentence timing |
 | `transcript.json`, `visuals/` | Permanent cue IDs and scene plans |
 | `images/`, `overlays/` | One validated image per cue, shared reference, exact labels |
@@ -99,7 +121,7 @@ python -m video_automation validate video_JOB_HASH
 
 Temporary HTTP failures, transport errors, missing image responses, and invalid images receive bounded exponential-backoff retries. Authentication, unsupported content, failed source audits, and invalid narration fail clearly. The retry counter persists across restarts. `--retry-failed` explicitly starts one new bounded batch for failed or interrupted stages; successful stages remain cached. An interrupted request can still be billable if the provider completed it before the client lost the response.
 
-The character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken. Exactly one automatic length revision is allowed. A second failure stops before speech or image generation. Original ElevenLabs alignment must match that exact text. A mismatch fails clearly rather than inventing timestamps. Timing is frozen after audio decoding; later speech changes require regeneration and alignment.
+The character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken. Topic mode allows exactly one automatic length revision; a second failure stops before speech or image generation. Script mode rejects out-of-range input without rewriting it. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Timing is frozen after audio decoding; later speech changes require regeneration and alignment.
 
 Visual cues follow aligned words and sentence boundaries. Their count is dynamic. Frame durations derive from adjacent absolute boundaries. Boundaries that collapse onto one frame are merged without dropping text. The first visual starts at frame zero; the last image holds until the final recording ends. Output may pad the final audio by less than one frame to match the encoded video.
 

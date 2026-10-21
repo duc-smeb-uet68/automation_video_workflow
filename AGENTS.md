@@ -12,7 +12,7 @@
 
 ## Project overview
 
-This repository contains a Python CLI that turns one topic into a narrated educational video. It uses provider APIs for generation, local files for job state, and FFmpeg for deterministic rendering. The MVP runs one worker per jobs directory, with sequential image generation and resumable checkpoints. There is no web application or database.
+This repository contains a Python CLI that turns a narration file into a narrated educational video by default. Explicit topic mode also generates the narration from research. It uses provider APIs for generation, local files for job state, and FFmpeg for deterministic rendering. The MVP runs one worker per jobs directory, with sequential image generation and resumable checkpoints. There is no web application or database.
 
 Runtime: Python 3.11+, Pydantic 2, Pillow, httpx, and jsonschema. Tests use pytest. FFmpeg and ffprobe must be installed, with `libx264`, `loudnorm`, and `sidechaincompress` available.
 
@@ -65,9 +65,11 @@ The CLI automatically loads `config.local.json` from the working directory. Put 
 
 ## Production workflow and invariants
 
-1. Research the topic with bounded searches and retrieved source URLs. Generate a structured narration draft.
-2. Normalize CRLF/CR to LF and trim outer whitespace. Require exactly 4,500–5,000 Python Unicode characters, including internal spaces and punctuation. Permit only one automatic length revision.
-3. Audit every sentence against research. Reject unsupported claims, missing coverage, and references outside retrieved sources before paid speech or image generation.
+The default `input_mode` is `script`: `run narration.txt` or `run --script narration.txt` supplies final UTF-8 narration and skips research, drafting, revision, and source auditing. Snapshot the normalized input in `input_script.txt` with its hash so resume does not depend on the external file. `run --mode topic TOPIC` keeps the original workflow, recorded as `production` in manifests. Existing jobs retain their saved mode when resumed.
+
+1. In topic mode, research the topic with bounded searches and retrieved source URLs. Generate a structured narration draft. In script mode, read the supplied narration instead.
+2. Normalize CRLF/CR to LF and trim outer whitespace. Require exactly 4,500–5,000 Python Unicode characters in both modes, including internal spaces and punctuation. Topic mode permits only one automatic length revision; script mode never rewrites supplied text.
+3. In topic mode, audit every sentence against research. Reject unsupported claims, missing coverage, and references outside retrieved sources before paid speech or image generation. Script mode skips this audit explicitly.
 4. Send the exact normalized narration to ElevenLabs. Decode audio to WAV and derive word/sentence timing from original character alignment. Reject text mismatches instead of inventing timestamps.
 5. Build dynamic cues from aligned words. Plan visuals in batches of 24 while preserving every cue ID and its order.
 6. Generate images sequentially. Reuse the shared character reference and the first approved image within each scene group. Render exact labels with Pillow; overlays require stationary scenes.
@@ -78,19 +80,20 @@ Preserve these additional constraints:
 - Audio determines duration. Never hardcode cue counts, video length, image counts, or values from the existing imported video.
 - Derive clip lengths from adjacent absolute frame boundaries. Start at frame zero and hold the final image through the recording. Merge collapsed boundaries without losing text.
 - Support only `hold` and the centered 1.5% `slow_push` motion unless the task explicitly changes that scope.
-- Keep production, fixture, and imported modes distinct. Fixture/imported rendering does not prove live topic-to-video acceptance or fresh speech alignment.
+- Keep production, script, fixture, and imported modes distinct. Script mode still requires exact fresh speech alignment and the narration-length gate. Fixture/imported rendering does not prove live topic-to-video acceptance or fresh speech alignment.
 - Keep generation independent of browser interfaces. Retain the single-worker architecture unless the task explicitly requires a change.
 
 ## Jobs, recovery, and costs
 
-Default job folders use `jobs/video_<topic-hash>/`; `--job-id` supplies an administrative name. `manifest.json` holds state, attempts, cues, usage, and artifact hashes. `execution.jsonl` records events. Key outputs include `sources.json`, `script.txt`, `script.json`, `source_audit.json`, `alignment.json`, `transcript.json`, image/overlay folders, `rough.mp4`, `final.mp4`, `subtitles.en.srt`, and `quality_report.json`.
+Default job folders use `jobs/video_<input-hash>/`; script identity includes normalized narration and mode, while topic identity retains the original topic hash. `--job-id` supplies an administrative name and rejects changed inputs or modes. `manifest.json` holds state, attempts, cues, usage, and artifact hashes. `execution.jsonl` records events. Key outputs include `input_script.txt` in script mode, `sources.json` and `source_audit.json` in topic mode, and shared `script.txt`, `script.json`, `alignment.json`, `transcript.json`, image/overlay folders, `rough.mp4`, `final.mp4`, `subtitles.en.srt`, and `quality_report.json`.
 
 Use `Store.task()` for reusable work and list all output files in its result. Completed stages are reusable only when input hashes and output hashes match. Include changed prompts, models, settings, reference hashes, or an explicit version in affected cache inputs. A code change alone does not automatically invalidate cached stages. Write artifacts with the existing atomic helpers and resolve job-relative paths through `Store.path()`.
 
 `TemporaryError` receives bounded exponential-backoff retries. Other failures stop the stage. Attempts persist across restarts; `resume --retry-failed` explicitly resets failed/running attempts for another bounded batch. Preserve completed speech, images, clips, and raw provider responses during recovery.
 
 ```powershell
-& .\.venv\Scripts\python.exe -m video_automation run 'Your educational topic'
+& .\.venv\Scripts\python.exe -m video_automation run --script .\narration.txt
+& .\.venv\Scripts\python.exe -m video_automation run --mode topic 'Your educational topic'
 & .\.venv\Scripts\python.exe -m video_automation resume JOB_ID
 & .\.venv\Scripts\python.exe -m video_automation resume JOB_ID --retry-failed
 & .\.venv\Scripts\python.exe -m video_automation validate JOB_ID

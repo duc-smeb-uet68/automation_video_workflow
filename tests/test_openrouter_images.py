@@ -140,7 +140,7 @@ def test_doctor_and_cli_accept_openrouter_images_without_gemini_key(store, monke
     settings.write_text(store.config.model_dump_json(), encoding="utf-8")
     calls = []
     monkeypatch.setattr(Pipeline, "run", lambda pipeline: calls.append(1))
-    assert main(["--config", str(settings), "run", "Image preflight", "--job-id", "preflight"]) == 0
+    assert main(["--config", str(settings), "run", "--mode", "topic", "Image preflight", "--job-id", "preflight"]) == 0
     assert calls == [1]
 
 

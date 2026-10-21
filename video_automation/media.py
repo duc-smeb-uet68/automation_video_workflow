@@ -247,10 +247,13 @@ def validate(store) -> dict:
     except OSError as exc:
         script_text, script_present = "", False
         details["script_error"] = str(exc)
-    checks["narration_length"] = script_present and (manifest.mode != "production" or (
+    generated_speech = manifest.mode in {"production", "script"}
+    checks["narration_length"] = script_present and (not generated_speech or (
         4500 <= len(normalize(script_text)) <= 5000 and script_text == normalize(script_text)
         and len(script_text) == manifest.script_character_count))
-    details["narration_length"] = {"characters": len(normalize(script_text)), "enforced": manifest.mode == "production"}
+    details["narration_length"] = {"characters": len(normalize(script_text)), "enforced": generated_speech}
+    if manifest.mode == "script":
+        details["source_audit"] = "Skipped: narration supplied by the user."
 
     def images():
         for cue in manifest.cues:
@@ -283,9 +286,9 @@ def validate(store) -> dict:
             details["alignment_error"] = str(exc)
     else:
         check("spoken_text_coverage", lambda: " ".join(c.text for c in manifest.cues) == " ".join(script_text.split()))
-        if manifest.mode == "production":
+        if generated_speech:
             checks["alignment_audio_match"] = False
-            details["alignment_error"] = "Production requires alignment.json"
+            details["alignment_error"] = "Generated speech requires alignment.json"
     check("caption_bounds", lambda: all(0 <= c.start < c.end <= manifest.audio_duration + 0.001 for c in manifest.cues)
           and store.path("subtitles.en.srt").read_text(encoding="utf-8") == subtitles(manifest.cues, manifest.audio_duration))
 

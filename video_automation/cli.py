@@ -68,8 +68,10 @@ def main(argv=None):
     commands.add_parser("doctor", help="Check local tools and credential presence without revealing secrets")
     setup = commands.add_parser("init", help="Write setup configuration without overwriting an existing file")
     setup.add_argument("--output", type=Path, default=Path("config.local.json"))
-    run = commands.add_parser("run", help="Produce a complete video from a topic; reuses the topic's existing job")
-    run.add_argument("topic")
+    run = commands.add_parser("run", help="Produce a video from a narration file (default) or an explicit topic")
+    run.add_argument("input", nargs="?", help="UTF-8 narration file, or topic text with --mode topic")
+    run.add_argument("--mode", choices=("script", "topic"), help="Input mode; defaults to input_mode in configuration (script)")
+    run.add_argument("--script", type=Path, help="UTF-8 narration file; selects script mode without a positional input")
     run.add_argument("--job-id")
     resume = commands.add_parser("resume", help="Resume an existing job with successful checkpoints preserved")
     resume.add_argument("job")
@@ -104,7 +106,17 @@ def main(argv=None):
             return doctor(config)
         with worker_lock(config.jobs_dir):
             if args.command == "run":
-                pipeline = Pipeline.create(config, args.topic, args.job_id)
+                mode = args.mode or config.input_mode
+                if args.script is not None:
+                    if args.input is not None or args.mode == "topic":
+                        raise PipelineError("Use --script alone, without a positional input or --mode topic")
+                    mode = "script"
+                if args.input is None and args.script is None:
+                    raise PipelineError("run requires a narration file; use --script PATH or --mode topic TOPIC")
+                if mode == "script":
+                    pipeline = Pipeline.create(config, job_id=args.job_id, script_path=args.script or Path(args.input))
+                else:
+                    pipeline = Pipeline.create(config, args.input, args.job_id)
                 if not pipeline.store.manifest.stages:
                     missing = [name for name in config.generation_keys if not os.environ.get(name)]
                     if not config.voice_id:

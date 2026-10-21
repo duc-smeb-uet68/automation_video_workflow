@@ -14,6 +14,7 @@ class Record(BaseModel):
 
 class Config(Record):
     jobs_dir: Path = Path("jobs")
+    input_mode: Literal["script", "topic"] = "script"
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     text_provider: Literal["openrouter", "openai"] = "openrouter"
@@ -161,7 +162,8 @@ class Manifest(Record):
     schema_version: int = 1
     job_id: str
     topic: str
-    mode: Literal["production", "fixture", "imported"] = "production"
+    mode: Literal["production", "script", "fixture", "imported"] = "production"
+    script_input_hash: str | None = None
     status: Literal["pending", "running", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0
     fps: int = 30

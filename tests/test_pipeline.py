@@ -320,8 +320,13 @@ def test_production_orchestration_and_resume_with_offline_contracts(store, monke
     assert len(store.manifest.cues) != 81
 
 
-def test_offline_full_pipeline_renders_real_mp4(store):
+@pytest.mark.parametrize("mode", ["production", "script"])
+def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode):
     provider = FakeProviders()
+    if mode == "script":
+        path = tmp_path / "narration.txt"
+        path.write_text(narration(), encoding="utf-8")
+        store = Pipeline.create(store.config, script_path=path).store
     pipeline = Pipeline(store, provider)
     report = pipeline.run()
     assert report["passed"] and report["details"]["narration_length"]["enforced"]
@@ -330,6 +335,19 @@ def test_offline_full_pipeline_renders_real_mp4(store):
     assert store.path("final.mp4").is_file()
     assert store.path("subtitles.en.srt").is_file()
     assert store.manifest.total_frames == 240
+    assert report["mode"] == mode
+    if mode == "script":
+        assert report["details"]["source_audit"] == "Skipped: narration supplied by the user."
+        assert not {"research", "script", "revision", "audit"} & set(provider.calls)
+        assert not store.path("sources.json").exists()
+        assert not store.path("source_audit.json").exists()
+        # Script mode still requires fresh speech alignment and the production length gate.
+        store.path("alignment.json").unlink()
+        with pytest.raises(PipelineError, match="alignment_audio_match"):
+            media.validate(store)
+        atomic_bytes(store.path("script.txt"), b"Too short.")
+        with pytest.raises(PipelineError, match="narration_length"):
+            media.validate(store)
 
 
 def test_renderer_integration_music_and_cache(config):
@@ -401,7 +419,7 @@ def test_cli_missing_setup_fails_before_requests(config, tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     settings = tmp_path / "config.json"
     settings.write_text(config.model_dump_json(), encoding="utf-8")
-    assert main(["--config", str(settings), "run", "Missing setup fixture", "--job-id", "missing_setup"]) == 1
+    assert main(["--config", str(settings), "run", "--mode", "topic", "Missing setup fixture", "--job-id", "missing_setup"]) == 1
     manifest = read_json(config.jobs_dir / "missing_setup/manifest.json")
     assert manifest["status"] == "failed"
     assert manifest["usage"] == [] and manifest["stages"] == {}
@@ -411,3 +429,147 @@ def test_cli_missing_setup_fails_before_requests(config, tmp_path, monkeypatch):
 def test_overlay_rejects_unfit_text(config, tmp_path):
     with pytest.raises(PipelineError, match="does not fit"):
         media.overlay(config, "x"*1000, tmp_path/"bad.png")
+
+
+def test_script_mode_normalizes_skips_research_and_resumes_from_snapshot(config, tmp_path, monkeypatch):
+    source = tmp_path / "narration.txt"
+    source.write_bytes(("\ufeff \r\n" + narration() + "\r\n ").encode("utf-8"))
+    pipeline = Pipeline.create(config, script_path=source)
+    provider = FakeProviders()
+    pipeline.providers = provider
+    monkeypatch.setattr(media, "render", lambda store: None)
+    monkeypatch.setattr(media, "finish", lambda store: None)
+    monkeypatch.setattr(media, "validate", lambda store: {"passed": True})
+    pipeline.run()
+    assert provider.spoken == narration()
+    assert pipeline.store.manifest.mode == "script"
+    assert not {"research", "script", "revision", "audit"} & set(provider.calls)
+    assert pipeline.store.path("input_script.txt").read_text(encoding="utf-8") == narration()
+    assert pipeline.store.path("script.txt").read_text(encoding="utf-8") == narration()
+    transcript = read_json(pipeline.store.path("transcript.json"))
+    alignment = read_json(pipeline.store.path("alignment.json"))
+    assert transcript and all(c["start"] < c["end"] for c in transcript)
+    assert " ".join(c["text"] for c in transcript) == " ".join(narration().split())
+    assert "".join(alignment["characters"]["characters"]) == narration()
+    assert len(alignment["words"]) == len(narration().split())
+    before = list(provider.calls)
+    source.unlink()
+    # Rebuild derived script files from the saved input without buying speech again.
+    pipeline.store.path("script.txt").unlink()
+    pipeline.store.path("script.json").unlink()
+    resumed = Pipeline(Store(pipeline.store.folder, config), provider)
+    resumed.run()
+    assert provider.calls == before
+    assert resumed.store.manifest.status == "completed"
+    assert resumed.store.path("script.txt").read_text(encoding="utf-8") == narration()
+
+
+def test_script_identity_reuses_normalized_content_and_rejects_job_collision(config, tmp_path):
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    original = Pipeline.create(config, script_path=source)
+    copy = tmp_path / "another_name.txt"
+    copy.write_bytes(("\ufeff\r\n" + narration() + "\r\n").encode("utf-8"))
+    assert Pipeline.create(config, script_path=copy).store.folder == original.store.folder
+    before = original.store.path("input_script.txt").read_bytes()
+    source.write_text(narration().replace("fire", "lake"), encoding="utf-8")
+    assert Pipeline.create(config, script_path=source).store.folder != original.store.folder
+    with pytest.raises(PipelineError, match="different topic, script, or mode"):
+        Pipeline.create(config, job_id=original.store.manifest.job_id, script_path=source)
+    with pytest.raises(PipelineError, match="different topic, script, or mode"):
+        Pipeline.create(config, "A topic", original.store.manifest.job_id)
+    assert original.store.path("input_script.txt").read_bytes() == before
+
+
+def test_corrupt_script_snapshot_blocks_generation_and_can_be_restored(config, tmp_path):
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    store = Pipeline.create(config, script_path=source).store
+    atomic_bytes(store.path("input_script.txt"), narration().replace("fire", "lake").encode("utf-8"))
+    provider = FakeProviders()
+    with pytest.raises(PipelineError, match="Saved input script hash mismatch"):
+        Pipeline(Store(store.folder, config), provider).run()
+    assert provider.calls == []
+    restored = Pipeline.create(config, script_path=source)
+    assert restored.script().narration == narration()
+
+
+@pytest.mark.parametrize("length", [0, 4499, 5001])
+def test_invalid_input_script_stops_before_job_creation(config, tmp_path, length):
+    source = tmp_path / "invalid.txt"
+    source.write_text("x" * length, encoding="utf-8")
+    with pytest.raises(PipelineError, match="required 4500"):
+        Pipeline.create(config, script_path=source)
+    assert not config.jobs_dir.exists()
+
+
+@pytest.mark.parametrize("length", [4500, 5000])
+def test_input_script_accepts_exact_length_boundaries(config, tmp_path, length):
+    source = tmp_path / "boundary.txt"
+    source.write_text("é" * (length - 1) + ".", encoding="utf-8")
+    pipeline = Pipeline.create(config, script_path=source)
+    assert pipeline.script().character_count == length
+
+
+@pytest.mark.parametrize("use_flag", [False, True])
+def test_cli_defaults_to_script_mode_without_changing_old_config(config, tmp_path, monkeypatch, use_flag):
+    from video_automation.cli import main
+    config.voice_id = "fixture-voice"
+    for name in config.generation_keys:
+        monkeypatch.setenv(name, "fixture-key")
+    settings = tmp_path / "config.json"
+    data = config.model_dump(mode="json")
+    data.pop("input_mode")
+    settings.write_text(json.dumps(data), encoding="utf-8")
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(Pipeline, "run", lambda pipeline: calls.append((pipeline.store.manifest.mode, pipeline.script())))
+    args = ["--config", str(settings), "run"] + (["--script"] if use_flag else []) + [str(source)]
+    assert main(args) == 0
+    assert len(calls) == 1 and calls[0][0] == "script"
+    assert calls[0][1].narration == narration()
+
+
+def test_cli_config_topic_default_and_explicit_script_override(config, tmp_path, monkeypatch):
+    from video_automation.cli import main
+    config.input_mode = "topic"
+    config.voice_id = "fixture-voice"
+    for name in config.generation_keys:
+        monkeypatch.setenv(name, "fixture-key")
+    settings = tmp_path / "config.json"
+    settings.write_text(config.model_dump_json(), encoding="utf-8")
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(Pipeline, "run", lambda pipeline: calls.append(pipeline.store.manifest.mode))
+    assert main(["--config", str(settings), "run", "A topic"]) == 0
+    assert main(["--config", str(settings), "run", "--script", str(source)]) == 0
+    assert main(["--config", str(settings), "run", "--mode", "script", str(source)]) == 0
+    assert calls == ["production", "script", "script"]
+
+
+@pytest.mark.parametrize("inputs", [[], ["ignored", "--script", "file.txt"], ["--mode", "topic", "--script", "file.txt"]])
+def test_cli_rejects_missing_or_ambiguous_input(config, tmp_path, monkeypatch, capsys, inputs):
+    from video_automation.cli import main
+    settings = tmp_path / "config.json"
+    settings.write_text(config.model_dump_json(), encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(Pipeline, "run", lambda pipeline: calls.append(1))
+    assert main(["--config", str(settings), "run", *inputs]) == 1
+    assert calls == []
+    assert "Error:" in capsys.readouterr().err
+    assert not list(config.jobs_dir.glob("*/manifest.json"))
+
+
+def test_existing_manifest_resumes_topic_workflow_despite_script_default(store, monkeypatch):
+    manifest = store.manifest.model_dump(mode="json")
+    manifest.pop("script_input_hash")
+    store.path("manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    restored = Store(store.folder, store.config)
+    assert restored.config.input_mode == "script"
+    assert restored.manifest.mode == "production"
+    provider = FakeProviders("Too short.")
+    with pytest.raises(PipelineError, match="required 4500"):
+        Pipeline(restored, provider).run()
+    assert provider.calls == ["research", "script", "revision"]

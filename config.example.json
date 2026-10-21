@@ -1,5 +1,6 @@
 {
   "jobs_dir": "jobs",
+  "input_mode": "script",
   "ffmpeg": "ffmpeg",
   "ffprobe": "ffprobe",
   "text_provider": "openrouter",
