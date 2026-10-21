@@ -24,7 +24,7 @@ def png(color="#fffaf0"):
 def store(tmp_path):
     config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice",
         "max_attempts": 2, "retry_backoff_seconds": 0, "image_interval_seconds": 0})
-    return Store(config.jobs_dir / "images", config, Manifest(job_id="images", topic="Caregivers"))
+    return Store(config.jobs_dir / "images", config, Manifest(job_id="images", topic="Caregivers", image_strategy="text_only"))
 
 
 def mock_http(monkeypatch, handler):
@@ -56,33 +56,23 @@ def test_generation_keys_follow_both_providers(text, image, keys):
     assert Config(text_provider=text, image_provider=image).generation_keys == keys
 
 
-@pytest.mark.parametrize("reference_count", [0, 2])
-def test_image_http_contract_references_and_usage(store, monkeypatch, reference_count):
+def test_image_http_contract_text_only_and_usage(store, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-openrouter-key")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    references = []
-    for index, color in enumerate(["red", "blue"][:reference_count]):
-        path = store.path(f"references/{index}.png")
-        atomic_bytes(path, png(color))
-        references.append(path)
     content, captured = png(), []
     def handler(request):
         captured.append(request)
         return httpx.Response(200, json=image_response(content))
     mock_http(monkeypatch, handler)
-    assert Providers(store).image("A camp scene.", references) == content
+    assert Providers(store).image("A camp scene.") == content
     request = captured[0]
     payload = json.loads(request.content)
     assert request.method == "POST" and str(request.url) == "https://openrouter.ai/api/v1/images"
     assert request.headers["Authorization"] == "Bearer fixture-openrouter-key"
     assert payload["model"] == "google/gemini-3.1-flash-lite-image"
-    assert payload["prompt"] == "A camp scene.\n" + STYLE
+    assert payload["prompt"] == "A camp scene."
     assert payload["n"] == 1 and payload["resolution"] == "1K" and payload["aspect_ratio"] == "16:9"
-    if references:
-        assert [base64.b64decode(r["image_url"]["url"].split(",", 1)[1]) for r in payload["input_references"]] == [p.read_bytes() for p in references]
-        assert all(r["type"] == "image_url" for r in payload["input_references"])
-    else:
-        assert "input_references" not in payload
+    assert set(payload) == {"model", "prompt", "n", "resolution", "aspect_ratio"}
     usage = store.manifest.usage[0]
     assert usage["provider"] == "openrouter.ai" and usage["model"] == payload["model"]
     assert usage["provider_usage"]["cost"] == 0.012
@@ -98,7 +88,7 @@ def test_missing_or_malformed_image_is_retryable(store, monkeypatch, data):
     client = Providers(store)
     monkeypatch.setattr(client, "post", lambda *args: data)
     with pytest.raises(TemporaryError):
-        client.image("A scene", [])
+        client.image("A scene")
 
 
 def test_vector_image_is_rejected(store, monkeypatch):
@@ -106,7 +96,7 @@ def test_vector_image_is_rejected(store, monkeypatch):
     client = Providers(store)
     monkeypatch.setattr(client, "post", lambda *args: {"data": [{"media_type": "image/svg+xml", "b64_json": "PHN2Zy8+"}]})
     with pytest.raises(PipelineError, match="unsupported image format"):
-        client.image("A scene", [])
+        client.image("A scene")
 
 
 def test_gemini_direct_route_remains_available(store, monkeypatch):
@@ -119,10 +109,14 @@ def test_gemini_direct_route_remains_available(store, monkeypatch):
         return httpx.Response(200, json={"candidates": [{"content": {"parts": [{"inlineData": {
             "mimeType": "image/png", "data": base64.b64encode(content).decode()}}]}}]})
     mock_http(monkeypatch, handler)
-    assert Providers(store).image("A scene", []) == content
+    assert Providers(store).image("A scene") == content
     request = captured[0]
     assert str(request.url) == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent"
     assert request.headers["x-goog-api-key"] == "fixture-gemini-key"
+    payload = json.loads(request.content)
+    assert payload["contents"] == [{"role": "user", "parts": [{"text": "A scene"}]}]
+    assert payload["generationConfig"]["imageConfig"] == {"aspectRatio": "16:9"}
+    assert payload["generationConfig"]["responseModalities"] == ["TEXT", "IMAGE"]
 
 
 def test_doctor_and_cli_accept_openrouter_images_without_gemini_key(store, monkeypatch, capsys, tmp_path):
@@ -161,24 +155,24 @@ def test_failed_openrouter_image_resumes_without_replacing_successful_work(store
     with pytest.raises(TemporaryError, match="HTTP 429"):
         Pipeline(store).images()
     first_hash = file_hash(store.path("images/cue_0001.png"))
-    assert len(requests) == 4  # Reference, first cue, then two bounded failed attempts.
+    assert len(requests) == 3  # First cue, then two bounded failed attempts.
     resumed = Store(store.folder, store.config)
     with pytest.raises(PipelineError, match="retry limit reached"):
         Pipeline(resumed).images()
-    assert len(requests) == 4
+    assert len(requests) == 3
     failures_enabled[0] = False
     resumed.manifest.stages["image.cue_0002"].attempts = 0
     resumed.save()
     Pipeline(resumed).images()
-    assert len(requests) == 6
+    assert len(requests) == 5
     assert file_hash(resumed.path("images/cue_0001.png")) == first_hash
     assert file_hash(resumed.path("audio/narration.wav")) == voice_hash
     assert resumed.manifest.stages["image.cue_0001"].attempts == 1
     Pipeline(Store(resumed.folder, store.config)).images()
-    assert len(requests) == 6
+    assert len(requests) == 5
 
 
-def test_image_model_changes_regenerate_references_and_cues_only(store, monkeypatch):
+def test_image_model_changes_regenerate_cues_only(store, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
     store.manifest.cues = [Cue(id="cue_0001", text="A scene.", start=0, end=1, word_start=0, word_end=2,
                               scene_group="camp", scene_description="Parent at camp.")]
@@ -190,12 +184,12 @@ def test_image_model_changes_regenerate_references_and_cues_only(store, monkeypa
     text_settings = store.config.text_cache_settings.copy()
     Pipeline(store).images()
     Pipeline(store).images()
-    assert len(calls) == 2
+    assert len(calls) == 1
     store.config.openrouter_image_model = "provider/another-image-model"
     Pipeline(store).images()
-    assert calls == ["google/gemini-3.1-flash-lite-image"]*2 + ["provider/another-image-model"]*2
+    assert calls == ["google/gemini-3.1-flash-lite-image", "provider/another-image-model"]
     assert store.config.text_cache_settings == text_settings
-    assert len(list((store.config.jobs_dir / "references").glob("*.png"))) == 2
+    assert not (store.config.jobs_dir / "references").exists()
 
 
 def test_image_provider_is_part_of_cache_key():
@@ -204,6 +198,61 @@ def test_image_provider_is_part_of_cache_key():
     config.image_provider = "gemini"
     config.gemini_model = config.openrouter_image_model
     assert before != config.image_cache_settings
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "gemini"])
+def test_complete_prompt_list_is_saved_before_text_only_requests(store, monkeypatch, provider):
+    store.config.image_provider = provider
+    store.config.character_reference = store.folder / "missing-reference.png"
+    monkeypatch.setenv(store.config.image_key_env, "fixture-key")
+    store.manifest.cues = [Cue(id=f"cue_{index:04}", text="A scene.", start=index-1, end=index,
+        word_start=index-1, word_end=index, character_ids=["scientist"], scene_group="lab",
+        scene_description=f"Scientist with short black hair and a blue coat examines sample {index} at a white lab bench.")
+        for index in range(1, 3)]
+    captured = []
+
+    def handler(request):
+        prompts = read_json(store.path("image_prompts.json"))
+        assert [record["cue_id"] for record in prompts] == [cue.id for cue in store.manifest.cues]
+        assert store.manifest.stages["image.prompts"].status == "completed"
+        payload = json.loads(request.content)
+        if provider == "openrouter":
+            assert set(payload) == {"model", "prompt", "n", "resolution", "aspect_ratio"}
+            prompt = payload["prompt"]
+            result = image_response(png())
+        else:
+            parts = payload["contents"][0]["parts"]
+            assert len(parts) == 1 and set(parts[0]) == {"text"}
+            prompt = parts[0]["text"]
+            result = {"candidates": [{"content": {"parts": [{"inlineData": {
+                "mimeType": "image/png", "data": base64.b64encode(png()).decode()}}]}}]}
+        assert prompt == prompts[len(captured)]["prompt"]
+        assert prompt == store.manifest.cues[len(captured)].scene_description + "\n" + STYLE
+        captured.append(prompt)
+        return httpx.Response(200, json=result)
+
+    mock_http(monkeypatch, handler)
+    pipeline = Pipeline(store)
+    assert pipeline.images() is None
+    assert len(captured) == 2
+    assert not store.path("images/character_reference.png").exists()
+    assert not (store.config.jobs_dir / "references").exists()
+    assert "image.character_reference" not in store.manifest.stages
+    assert all(store.path(cue.image_path).is_file() for cue in store.manifest.cues)
+    pipeline.images()
+    assert len(captured) == 2
+
+
+def test_ignored_character_reference_does_not_block_doctor_or_config_load(store, monkeypatch, capsys):
+    settings = store.folder / "config.json"
+    settings.write_text(store.config.model_copy(update={"character_reference": store.folder / "missing.png"}).model_dump_json(),
+                        encoding="utf-8")
+    loaded = Config.load(settings)
+    for key in loaded.generation_keys:
+        monkeypatch.setenv(key, "fixture-key")
+    monkeypatch.setattr(media, "run", lambda command: "version")
+    assert doctor(loaded) == 0
+    assert "character_reference" not in json.loads(capsys.readouterr().out)["checks"]
 
 
 def test_image_http_400_keeps_redacted_upstream_reason_and_request_id(store, monkeypatch):
@@ -217,7 +266,7 @@ def test_image_http_400_keeps_redacted_upstream_reason_and_request_id(store, mon
         return httpx.Response(400, json=body, headers={"x-request-id": "request-image-fixture"})
     mock_http(monkeypatch, handler)
     with pytest.raises(PipelineError, match=r"Gemini could not generate an image \(STOP\)") as error:
-        Providers(store).image("A scene.", [])
+        Providers(store).image("A scene.")
     assert not isinstance(error.value, TemporaryError)
     assert calls == [1]
     entry = store.manifest.usage[-1]

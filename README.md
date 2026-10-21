@@ -1,6 +1,6 @@
 # Educational video automation
 
-A Python CLI turns a supplied narration file into timed speech, visual plans, sequential images, and a validated video. Script-file input is the default. An explicit topic mode also performs bounded research, script generation, and source auditing as described in `video_automation_plan.md`. Jobs use atomic local manifests. One worker owns the jobs directory at a time. Generation uses provider APIs without browser steps.
+A Python CLI turns a supplied narration file into timed speech, visual plans, sequential images, and a validated video. This branch experiments with text-only image generation: each cue receives a complete standalone prompt, and each image request receives that prompt without context or reference images. Script-file input is the default. An explicit topic mode also performs bounded research, script generation, and source auditing as described in `video_automation_plan.md`. Jobs use atomic local manifests. One worker owns the jobs directory at a time. Generation uses provider APIs without browser steps.
 
 ## Setup
 
@@ -14,14 +14,14 @@ Copy-Item .env.example .env
 
 Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRouter is the default provider for both text (`openai/gpt-oss-120b`) and images (`google/gemini-3.1-flash-lite-image`). One OpenRouter key covers both stages; no `GEMINI_API_KEY` is required with these defaults. Set `voice_id` in `config.local.json` to an ElevenLabs voice available to your account. Existing process environment variables take precedence over `.env`. The loader supports simple `KEY=value` lines, optionally quoted; it does not expand shell expressions. Keys are never stored in the manifest or execution log.
 
-`init` detects the existing `D:/kenlive/bin` FFmpeg installation when the tools are not on PATH. All other installations can set executable paths in configuration. Relative music, font, reference, and jobs paths resolve against the configuration file's directory. `config.local.json` loads automatically when running from this directory; `--config` selects another setup file. `config.example.json` documents the main settings.
+`init` detects the existing `D:/kenlive/bin` FFmpeg installation when the tools are not on PATH. All other installations can set executable paths in configuration. Relative music, font, and jobs paths resolve against the configuration file's directory. The legacy `character_reference` setting remains accepted but is ignored on this branch, including by setup checks. `config.local.json` loads automatically when running from this directory; `--config` selects another setup file. `config.example.json` documents the main settings.
 
 ```powershell
 python -m video_automation doctor
 python -m video_automation run .\narration.txt
 ```
 
-The narration file is the only per-video content input in the default mode. Model IDs, voice, style, resolution, retry limits, optional music, and optional character reference are configured once. The selected model IDs are explicit defaults; account access must be checked during setup. The configured speech models all accept the complete 4,500–5,000-character script in one request.
+The narration file is the only per-video content input in the default mode. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The selected model IDs are explicit defaults; account access must be checked during setup. The configured speech models all accept the complete 4,500–5,000-character script in one request.
 
 ## Input modes
 
@@ -80,19 +80,21 @@ The active setup in `config.local.json` uses:
 }
 ```
 
-Image requests use OpenRouter's dedicated `POST /api/v1/images` API and the same `OPENROUTER_API_KEY` as text generation. Each request asks for one 1K image at 16:9. Character and scene references are sent as base64 data URLs in `input_references`. Returned base64 raster images pass the existing file/dimension checks before being checkpointed. Usage and available cost data are retained in the manifest. Missing, empty, malformed, or invalid images receive bounded retries; successful images and voiceover remain cached.
+Image requests use OpenRouter's dedicated `POST /api/v1/images` API and the same `OPENROUTER_API_KEY` as text generation. Each request asks for one 1K image at 16:9. The request contains only a text prompt and generation settings; `input_references` is omitted. The direct Gemini route also sends only text parts. Returned base64 raster images pass the existing file/dimension checks before being checkpointed. Usage and available cost data are retained in the manifest. Missing, empty, malformed, or invalid images receive bounded retries; successful images and voiceover remain cached.
 
-Change `openrouter_image_model` to choose another image model that supports reference images and the configured resolution/aspect ratio. Image settings have their own cache keys, including provider and model. Changing them regenerates affected images and references without invalidating unchanged research, narration, speech, or visual planning. Existing media artifacts remain in their job folders until replaced by their regenerated outputs.
+Change `openrouter_image_model` to choose another text-to-image model supporting the configured resolution/aspect ratio. Image settings have their own cache keys, including provider, model, and text-only strategy version. Changing them regenerates affected images without invalidating unchanged research, narration, speech, or visual planning. Each image depends on its exact prompt rather than earlier image files. Existing experimental media artifacts remain in their job folders until replaced by their regenerated outputs.
+
+The visual planner writes complete scene descriptions in batches of 24 cues. Each description specifies visible characters and their appearance, actions, setting, objects, composition, and colors. Recurring characters repeat their appearance details. Previous scene descriptions may provide text-only context to the planner; the image model receives only the current prompt. The pipeline appends the fixed doodle style exactly once and checkpoints the complete ordered list in `image_prompts.json` before the first image request. Each record has `cue_id` and `prompt`; the saved prompt is the exact text sent to the image provider. There is no additional prompt-generation request or review pause. Full visual consistency remains a live-quality acceptance check.
 
 Direct Gemini remains optional: set `image_provider` to `gemini`, set `gemini_model` to an available Google image model, and supply `GEMINI_API_KEY`. Its current code default is `gemini-3.1-flash-lite-image`; an older local setup may retain a previous `gemini_model` value and should update it before selecting direct Gemini. OpenRouter image generation does not use that field or require a separate Google account/key. Live model access and available credits must still be verified with your OpenRouter account.
 
 ## Artifacts
 
-Each input receives a stable job directory, `jobs/video_<input-hash>/`. Topic mode hashes the topic; script mode hashes the normalized narration and its mode. `--job-id` provides an optional administrative name.
+Each input receives a stable experimental job directory, `jobs/video_text_only_<input-hash>/`. Topic mode hashes the topic; script mode hashes the normalized narration and its mode. `--job-id` provides an optional administrative name. New generated jobs record `image_strategy: "text_only"` in their manifest. Missing legacy strategy fields resolve to `"reference"`. This branch rejects legacy generated jobs before writing their files, including explicit job IDs, resume, validation, and editor export. Continue those jobs on `main`; the distinct default prefix keeps experimental results separate. Fixture and imported modes retain their existing rendering workflow.
 
 | Artifact | Contents |
 | --- | --- |
-| `manifest.json` | Job state, cues, timing, attempts, input hashes, artifact hashes, errors, usage |
+| `manifest.json` | Job state, image strategy, cues, timing, attempts, input hashes, artifact hashes, errors, usage |
 | `input_script.txt` | Normalized input snapshot for supplied-script jobs; retained for resume |
 | `sources.json` | Retrieved source URLs and supported claims; topic mode only |
 | `draft.json`, optional `draft_revision.json` | Original script draft and the single permitted length revision; topic mode only |
@@ -100,7 +102,9 @@ Each input receives a stable job directory, `jobs/video_<input-hash>/`. Topic mo
 | `source_audit.json` | Separate model audit of every sentence's source support; topic mode only |
 | `audio/narration.wav`, `alignment.json` | Final decoded audio and character, word, sentence timing |
 | `transcript.json`, `visuals/` | Permanent cue IDs and scene plans |
-| `images/`, `overlays/` | One validated image per cue, shared reference, exact labels |
+| `image_prompts.json` | Ordered `{cue_id, prompt}` list containing the exact complete text for each image request |
+| `images/`, `overlays/` | One validated image per cue and optional exact labels; no character-reference image |
+| `render/prepared/`, `render/clips/`, `render/clips.txt` | Prepared image plates, encoded cue clips, and concatenation order |
 | `rough.mp4`, `render_metadata.json` | Synchronized rough cut and absolute frame boundaries |
 | `final.mp4`, `subtitles.en.srt` | H.264/AAC MP4 and separate subtitles |
 | `quality_report.json`, `audio_measurements.json` | Validation and audio measurements |
@@ -114,12 +118,12 @@ HTTP failures save selected, redacted provider error fields and any available re
 ## Resume and retries
 
 ```powershell
-python -m video_automation resume video_JOB_HASH
-python -m video_automation resume video_JOB_HASH --retry-failed
-python -m video_automation validate video_JOB_HASH
+python -m video_automation resume video_text_only_JOB_HASH
+python -m video_automation resume video_text_only_JOB_HASH --retry-failed
+python -m video_automation validate video_text_only_JOB_HASH
 ```
 
-`resume` accepts a job name, job folder, or manifest path. Completed stages are reused only when their input hashes and output file hashes match. A missing or corrupt output is rebuilt. Changed prompts, settings, and references invalidate dependent work. Image generation and clip rendering checkpoint each cue individually. Successful images and speech remain available if a later image fails.
+`resume` accepts a job name, job folder, or manifest path. Generated jobs must carry the text-only strategy marker on this branch. Completed stages are reused only when their input hashes and output file hashes match. A missing or corrupt output is rebuilt. Changed prompts and settings invalidate dependent work. Image generation and clip rendering checkpoint each cue individually. Successful images and speech remain available if a later image fails.
 
 Temporary HTTP failures, transport errors, missing image responses, and invalid images receive bounded exponential-backoff retries. Authentication, unsupported content, failed source audits, and invalid narration fail clearly. The retry counter persists across restarts. `--retry-failed` explicitly starts one new bounded batch for failed or interrupted stages; successful stages remain cached. An interrupted request can still be billable if the provider completed it before the client lost the response.
 
@@ -129,7 +133,7 @@ The character count uses Python Unicode characters after CRLF/CR normalization a
 
 Visual cues follow aligned words and sentence boundaries. Their count is dynamic. Frame durations derive from adjacent absolute boundaries. Boundaries that collapse onto one frame are merged without dropping text. The first visual starts at frame zero; the last image holds until the final recording ends. Output may pad the final audio by less than one frame to match the encoded video.
 
-The style and character design live in code. A generated character reference is reused across jobs under `jobs/references/`. Consecutive cues in a scene use the first approved image for that scene as an additional reference. Only `hold` and a centered 1.5% `slow_push` are supported. Overlay scenes remain stationary. Image checks cover file validity, dimensions, and coverage; artistic correctness is outside this MVP.
+The doodle style lives in code. Characters and appearance descriptions are chosen from the narration and repeated in standalone prompts. This branch neither creates nor reads character-reference or scene-reference images. Only `hold` and a centered 1.5% `slow_push` are supported. Overlay scenes remain stationary. Image checks cover file validity, dimensions, and coverage; artistic correctness is outside this MVP.
 
 Audio finishing uses two-pass loudness normalization. Optional local music loops, fades, and ducks under speech. Validation decodes the final file and checks image coverage, text coverage, timeline continuity, frame count, format, duration agreement within one frame, caption bounds, overlay bounds, peaks, and long silences in both narration and final audio. Failed validation writes a report and marks the job failed.
 
@@ -185,7 +189,7 @@ The final acceptance step remains an unattended **live** topic-to-video run with
 - [OpenRouter web search server tool](https://openrouter.ai/docs/guides/features/server-tools/web-search)
 - [OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs)
 - [Requested default: openai/gpt-oss-120b](https://openrouter.ai/openai/gpt-oss-120b)
-- [OpenRouter Image API and reference images](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
+- [OpenRouter Image API](https://openrouter.ai/docs/guides/overview/multimodal/image-generation)
 - [Requested image model: google/gemini-3.1-flash-lite-image](https://openrouter.ai/google/gemini-3.1-flash-lite-image)
 - [OpenAI Docs: structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 - [OpenAI Docs: web search](https://developers.openai.com/api/docs/guides/tools-web-search)

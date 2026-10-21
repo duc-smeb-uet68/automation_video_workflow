@@ -14,7 +14,7 @@ from video_automation import assets, media
 from video_automation.models import Config, Cue, Manifest, Word
 from video_automation.pipeline import Pipeline
 from video_automation.providers import Providers
-from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, file_hash, read_json, worker_lock
+from video_automation.store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, worker_lock, write_json
 from video_automation.timing import aligned_words, assign_frames, make_script, normalize, segment_words
 
 
@@ -26,7 +26,7 @@ def config(tmp_path):
 
 @pytest.fixture
 def store(config):
-    return Store(config.jobs_dir / "test", config, Manifest(job_id="test", topic="Ancient caregivers"))
+    return Store(config.jobs_dir / "test", config, Manifest(job_id="test", topic="Ancient caregivers", image_strategy="text_only"))
 
 
 def narration():
@@ -79,7 +79,7 @@ class FakeProviders:
         return {"cues": [{"id": c.id, "scene_group": "camp", "character_ids": ["parent"],
                           "scene_description": "Parent beside a fire.", "overlay_text": None, "motion": "hold"} for c in cues]}
 
-    def image(self, prompt, references):
+    def image(self, prompt):
         self.calls.append("image")
         return image_bytes()
 
@@ -251,15 +251,15 @@ def test_invalid_generated_image_retries_before_approval(store):
     provider = FakeProviders()
     original = provider.image
     calls = []
-    def image(prompt, references):
+    def image(prompt):
         calls.append(1)
-        return b"invalid-image" if len(calls) == 1 else original(prompt, references)
+        return b"invalid-image" if len(calls) == 1 else original(prompt)
     provider.image = image
     store.manifest.cues = [Cue(id="cue_0001", text="Scene.", start=0, end=1, word_start=0, word_end=1,
                               scene_group="camp", scene_description="Parent by fire.")]
     Pipeline(store, provider).images()
-    assert store.manifest.stages["image.character_reference"].attempts == 2
-    assert store.manifest.stages["image.cue_0001"].attempts == 1
+    assert "image.character_reference" not in store.manifest.stages
+    assert store.manifest.stages["image.cue_0001"].attempts == 2
     assert media.check_image(store.path("images/cue_0001.png"))["width"] == 640
 
 
@@ -271,10 +271,10 @@ def test_interrupted_image_preserves_previous_images_and_speech(store):
     store.manifest.cues = [Cue(id=f"cue_{i:04}", text="A scene.", start=i-1, end=i,
                              word_start=(i-1)*2, word_end=i*2, scene_group="camp", scene_description=f"scene {i}") for i in range(1, 4)]
     original = provider.image
-    def interrupt(prompt, references):
+    def interrupt(prompt):
         if "scene 2" in prompt:
             raise KeyboardInterrupt
-        return original(prompt, references)
+        return original(prompt)
     provider.image = interrupt
     with pytest.raises(KeyboardInterrupt):
         pipeline.images()
@@ -288,6 +288,97 @@ def test_interrupted_image_preserves_previous_images_and_speech(store):
     assert file_hash(store.path("audio/narration.wav")) == voice_hash
     assert resumed.store.manifest.stages["image.cue_0001"].attempts == 1
     assert all(resumed.store.path(c.image_path).is_file() for c in resumed.store.manifest.cues)
+
+
+@pytest.mark.parametrize("invalid", ["blank", "duplicate", "empty"])
+def test_invalid_prompt_inputs_block_all_image_requests(store, invalid):
+    provider = FakeProviders()
+    store.manifest.cues = [Cue(id=f"cue_{index:04}", text="A scene.", start=index-1, end=index,
+        word_start=index-1, word_end=index, scene_description="Scientist with a blue coat at a lab bench.")
+        for index in range(1, 3)]
+    if invalid == "blank":
+        store.manifest.cues[-1].scene_description = " "
+    elif invalid == "duplicate":
+        store.manifest.cues[-1].id = store.manifest.cues[0].id
+    else:
+        store.manifest.cues = []
+    with pytest.raises(PipelineError, match="Image prompts require"):
+        Pipeline(store, provider).images()
+    assert provider.calls == []
+    assert not store.path("image_prompts.json").exists()
+    assert not store.path("images").exists()
+
+
+def test_prompt_change_regenerates_only_affected_image_and_revalidates_cache(store):
+    provider = FakeProviders()
+    store.manifest.cues = [Cue(id=f"cue_{index:04}", text="A scene.", start=index-1, end=index,
+        word_start=index-1, word_end=index, scene_group="lab",
+        scene_description=f"Scientist with a blue coat examines sample {index}.") for index in range(1, 3)]
+    pipeline = Pipeline(store, provider)
+    pipeline.images()
+    assert provider.calls == ["image", "image"]
+    stage = store.manifest.stages["image.prompts"]
+    stage.result["data"].reverse()
+    pipeline.images()
+    assert stage.attempts == 2
+    assert provider.calls == ["image", "image"]
+    assert read_json(store.path("image_prompts.json"))[0]["cue_id"] == "cue_0001"
+    store.manifest.cues[0].scene_description = "Scientist with a blue coat holds a red sample."
+    pipeline.images()
+    assert provider.calls == ["image", "image", "image"]
+    assert store.manifest.stages["image.cue_0002"].attempts == 1
+    assert read_json(store.path("image_prompts.json"))[0]["prompt"].startswith("Scientist with a blue coat holds a red sample.")
+
+
+@pytest.mark.parametrize("mode", ["script", "production"])
+def test_text_only_default_jobs_are_distinct_from_legacy_jobs(config, tmp_path, mode):
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    identity = {"mode": "script", "narration": narration()} if mode == "script" else "Caregivers"
+    old_folder = config.jobs_dir / ("video_" + digest(identity)[:12])
+    legacy = Manifest(job_id=old_folder.name, topic="Caregivers", mode=mode).model_dump(mode="json")
+    legacy.pop("image_strategy")
+    write_json(old_folder / "manifest.json", legacy)
+    before = (old_folder / "manifest.json").read_bytes()
+    pipeline = Pipeline.create(config, script_path=source) if mode == "script" else Pipeline.create(config, "Caregivers")
+    assert pipeline.store.manifest.job_id == "video_text_only_" + digest(identity)[:12]
+    assert read_json(pipeline.store.path("manifest.json"))["image_strategy"] == "text_only"
+    assert Manifest.model_validate(legacy).image_strategy == "reference"
+    assert (old_folder / "manifest.json").read_bytes() == before
+    assert Store(pipeline.store.folder, config).manifest.image_strategy == "text_only"
+
+
+@pytest.mark.parametrize("mode", ["script", "production"])
+@pytest.mark.parametrize("explicit_strategy", [False, True])
+@pytest.mark.parametrize("command", ["run", "resume", "validate", "export-kdenlive"])
+def test_legacy_jobs_are_rejected_without_writes(config, tmp_path, monkeypatch, capsys, mode, explicit_strategy, command):
+    from video_automation.cli import main
+    source = tmp_path / "narration.txt"
+    source.write_text(narration(), encoding="utf-8")
+    legacy_folder = config.jobs_dir / "legacy"
+    manifest = Manifest(job_id="legacy", topic="Caregivers", mode=mode,
+                        script_input_hash=digest(narration()) if mode == "script" else None).model_dump(mode="json")
+    if not explicit_strategy:
+        manifest.pop("image_strategy")
+    write_json(legacy_folder / "manifest.json", manifest)
+    atomic_bytes(legacy_folder / "input_script.txt", narration().encode("utf-8"))
+    atomic_bytes(legacy_folder / "images/cue_0001.png", image_bytes())
+    before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy_folder.rglob("*") if path.is_file()}
+    settings = tmp_path / "config.json"
+    settings.write_text(config.model_dump_json(), encoding="utf-8")
+    monkeypatch.setattr(Pipeline, "run", lambda pipeline: pytest.fail("Legacy job must not run"))
+    if command == "run":
+        args = (["--script", str(source)] if mode == "script" else ["--mode", "topic", "Caregivers"])
+        args += ["--job-id", "legacy"]
+    else:
+        args = ["legacy"]
+        if command == "resume":
+            args += ["--retry-failed"]
+        elif command == "export-kdenlive":
+            args += ["--template", str(tmp_path / "template.kdenlive")]
+    assert main(["--config", str(settings), command, *args]) == 1
+    assert "Legacy reference-based job is preserved" in capsys.readouterr().err
+    assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy_folder.rglob("*") if path.is_file()}
 
 
 def test_source_audit_blocks_unsupported_claims(store):
@@ -599,7 +690,7 @@ def test_visual_batch_retries_invalid_plan_before_checkpoint(store, invalid):
             elif invalid == "blank":
                 result["cues"][0]["scene_description"] = " "
             elif invalid == "character":
-                result["cues"][0]["character_ids"] = ["unknown"]
+                result["cues"][0]["character_ids"] = [" "]
             else:
                 del result["cues"][0]["motion"]
         return result

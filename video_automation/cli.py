@@ -54,7 +54,6 @@ def doctor(config):
         checks[name] = bool(os.environ.get(name))
     checks["voice_id"] = bool(config.voice_id)
     checks["music_file"] = not config.music_path or config.music_path.is_file()
-    checks["character_reference"] = not config.character_reference or config.character_reference.is_file()
     print(json.dumps({"ready_for_live_generation": all(checks.values()),
                       "text_provider": config.text_provider, "text_model": config.text_model,
                       "image_provider": config.image_provider, "image_model": config.image_model, "checks": checks}, indent=2))
@@ -97,7 +96,7 @@ def main(argv=None):
         if args.command == "init":
             if args.output.exists():
                 raise PipelineError(f"Configuration already exists: {args.output}")
-            data = config.model_dump(mode="json")
+            data = config.model_dump(mode="json", exclude={"character_reference"})
             data["jobs_dir"] = "jobs"
             write_json(args.output, data)
             print(str(args.output.resolve()))

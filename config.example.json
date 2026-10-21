@@ -17,7 +17,6 @@
   "max_attempts": 3,
   "image_interval_seconds": 1,
   "music_path": null,
-  "character_reference": null,
   "spending_ceiling_usd": null,
   "request_cost_caps_usd": {}
 }

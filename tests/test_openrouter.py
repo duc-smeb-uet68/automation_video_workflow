@@ -14,7 +14,7 @@ from video_automation.store import PipelineError, Store, TemporaryError, read_js
 @pytest.fixture
 def store(tmp_path):
     config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice"})
-    return Store(config.jobs_dir / "routing", config, Manifest(job_id="routing", topic="Caregivers"))
+    return Store(config.jobs_dir / "routing", config, Manifest(job_id="routing", topic="Caregivers", image_strategy="text_only"))
 
 
 def response(result, annotations=None):
@@ -321,7 +321,20 @@ def test_visual_request_schema_constrains_batch_without_mutating_shared_schema(s
     assert schema["minItems"] == schema["maxItems"] == 2
     assert schema["items"]["properties"]["id"]["enum"] == ["cue_0025", "cue_0026"]
     assert "enum" not in schema["items"]["properties"]["scene_description"]
+    assert "enum" not in schema["items"]["properties"]["character_ids"]["items"]
     assert json.dumps(VISUAL_SCHEMA, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai"])
+def test_visual_planner_accepts_narration_specific_characters(store, monkeypatch, visual_cues, visual_plan, provider):
+    store.config.text_provider = provider
+    monkeypatch.setenv(store.config.text_key_env, "fixture-key")
+    visual_plan["cues"][0]["character_ids"] = ["astronaut", "scientist"]
+    visual_plan["cues"][1]["character_ids"] = []
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: response(visual_plan))
+    assert client.visuals(visual_cues) == visual_plan
+    assert visual_cues[0].character_ids == []
 
 
 @pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "reordered", "character", "blank", "json"])
@@ -336,7 +349,7 @@ def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_
     elif invalid == "reordered":
         visual_plan["cues"].reverse()
     elif invalid == "character":
-        visual_plan["cues"][0]["character_ids"] = ["unknown"]
+        visual_plan["cues"][0]["character_ids"] = [" "]
     elif invalid == "blank":
         visual_plan["cues"][0]["scene_group"] = " "
     output = response(visual_plan)

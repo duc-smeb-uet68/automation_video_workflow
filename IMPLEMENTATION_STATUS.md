@@ -2,7 +2,17 @@
 
 Verified on 2026-10-21. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
 
-## Delivered
+## Text-only image generation experiment
+
+Branch `codex/text-only-image-prompts` replaces reference-based generation with standalone text prompts. Visual planning retains the doodle style while selecting characters appropriate to the narration and repeating appearance details in scene descriptions. The pipeline checkpoints the complete ordered `{cue_id, prompt}` list in `image_prompts.json` before the first image request. Mocked requests confirm that OpenRouter and direct Gemini receive exactly the saved prompt text without image attachments. The pipeline no longer creates or reads character-reference images. Legacy `character_reference` configuration remains accepted and is ignored by setup and generation.
+
+New generated jobs use `video_text_only_<input-hash>` IDs and record `image_strategy: "text_only"`. Legacy generated manifests default to the reference strategy and are rejected before job-file writes. Sixteen CLI regression cases cover script/topic jobs, absent/explicit legacy markers, and run, resume, validate, and editor-export commands; file contents and modification times remain unchanged. Fixture and imported rendering retain their existing workflow.
+
+The full offline suite passes **135 tests**, run with `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/text-only-full` in **54.09 seconds**. Focused image, visual, job-isolation, and configuration checks passed **72 tests** in **4.59 seconds**. Coverage includes text-only payloads for both image providers, exact prompt persistence before requests, dynamic characters, invalid prompt input rejection, cached prompt revalidation, independent image cache invalidation, retries, interrupted recovery, legacy preservation, and real FFmpeg integration. No authenticated generation requests were made for this experiment. Live image quality and character continuity remain unverified.
+
+The remaining sections retain historical evidence from the reference-based workflow on `main`.
+
+## Delivered before the text-only experiment
 
 - Python CLI, Pydantic records, setup configuration, local credential loading, and a single-worker lock.
 - Default script-file input (`run narration.txt` or `run --script narration.txt`) bypasses research, drafting, revision, and source auditing. It retains the 4,500–5,000-character gate, exact speech alignment, timed transcripts, and all downstream generation and validation. A hashed `input_script.txt` snapshot supports resume without the external file. Explicit `--mode topic` retains the original workflow; existing manifests keep their saved mode.
@@ -27,7 +37,7 @@ The full export contains `final.mp4`, `subtitles.en.srt`, `manifest.json`, `qual
 
 A complete cached rerun kept the final MP4 hash unchanged and reused all 81 clip checkpoints. Kdenlive XML has 81 timeline clips and a 1920×1080/30 fps profile. Export structure is checked; interactive editor playback was not tested. Sample frames from both fixture and full export were visually inspected.
 
-## Automated checks
+## Automated checks before the text-only experiment
 
 The complete suite passes: **109 tests**, run with `D:/python/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/image-error-full` (58.06 seconds). It covers Unicode counting and boundaries, one successful or failed length revision, blocked downstream generation, exact narration/alignment identity, dynamic cue coverage, collapsed frame boundaries, output corruption, persisted retry limits, failed atomic replacement, budget reservations, provider HTTP handling, bounded research/source provenance, invalid-image retry, interrupted-image recovery, source-audit failures, full pipeline orchestration, local credential loading, setup failure reporting, worker locking, path bounds, labels, and Kdenlive structure. The OpenRouter tests additionally verify exact text/image model selection, endpoint/key selection for all text/image provider combinations, strict local schema checks, bounded Exa research, flat/nested citation provenance, missing citation rejection, setup checks, credential loading, provider/model cache invalidation, Image API HTTP contracts, ordered reference-image data URLs, usage attribution, malformed-image retries, direct Gemini compatibility, and image recovery without replacing successful images or voiceover. Research recovery tests cover cited prose, a single tool-free formatting pass, original-search provenance, rejection of invented URLs and invalid schemas, refusal handling, both search output record types, request cost reservations, and preservation of both raw responses.
 

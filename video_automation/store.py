@@ -82,9 +82,12 @@ def worker_lock(root: Path):
 class Store:
     def __init__(self, folder: Path, config, manifest: Manifest | None = None):
         self.folder = folder.resolve()
-        self.folder.mkdir(parents=True, exist_ok=True)
         self.config = config
         self.manifest = manifest or Manifest.model_validate(read_json(self.folder / "manifest.json"))
+        if self.manifest.mode in {"production", "script"} and self.manifest.image_strategy != "text_only":
+            raise PipelineError("Legacy reference-based job is preserved; create a new text-only job on this branch "
+                                "or use main to continue the existing job")
+        self.folder.mkdir(parents=True, exist_ok=True)
         self.save()
 
     def path(self, relative: str) -> Path:

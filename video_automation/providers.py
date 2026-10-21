@@ -4,7 +4,6 @@ import base64
 import json
 import os
 from copy import deepcopy
-from pathlib import Path
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -17,13 +16,7 @@ STYLE = """Hand-drawn 2D educational doodle, flat solid colors, bold black sligh
 marker outlines, simple round white heads, dot eyes, thin black limbs and mitten hands.
 Cream or flat-color background. No gradients, shadows, photographic texture, photorealism,
 3D or anime. Widescreen 16:9. Do not draw text, labels, numbers or watermarks.
-Keep the top quarter clear for optional exact text overlays. Preserve the reference
-characters' appearance, clothing, colors and the scene reference composition."""
-
-CHARACTERS = """Character reference sheet on cream background: parent with spiky bright
-orange hair and mustard-yellow tunic; tiny bald infant in tan wrap; trusted caregiver
-with messy brown hair and purple tunic. Each has a round white head and black dot eyes.
-Show all three characters separately with clear space between them. No text."""
+Keep the top quarter clear for optional exact text overlays."""
 
 SCRIPT_PROMPT = """Given the topic, write an English narration script of approximately
 4,500–5,000 characters, including spaces, punctuation, and line breaks. Use a calm,
@@ -52,8 +45,15 @@ Do not approve invented facts."""
 
 VISUAL_PROMPT = """Plan one scene for EVERY supplied cue, preserving cue IDs and order.
 Do not change narration or timing. Consecutive scenes in the same location use the same
-scene_group. Use character IDs parent, infant, caregiver as appropriate. Give scene-specific
-descriptions only; fixed doodle style is added in code. Put exact names, percentages and
+scene_group. Choose characters appropriate to the narration and give recurring characters
+stable, descriptive IDs. Use an empty character_ids list for scenes without characters.
+Each scene_description must be a complete standalone image prompt: describe every visible
+character's appearance, clothing and colors, their actions and expressions, the setting,
+objects, spatial relationships, background, and camera framing. Repeat the full appearance
+of recurring characters in every scene where they appear. Use previous scene descriptions
+as text-only planning context to maintain continuity, but never refer to previous scenes,
+reference images, "the same character", or any information outside the current description.
+Fixed doodle style is added in code. Put exact names, percentages and
 important numbers in overlay_text; never request drawn text. Keep overlays short. Label
 reconstructions when needed. Use only hold or slow_push; text-heavy or diagram scenes use
 hold. Preserve visual continuity using the supplied previous scenes."""
@@ -92,8 +92,8 @@ def validate_visual_plan(cues, plan):
     for record in plan["cues"]:
         if not record["scene_group"].strip() or not record["scene_description"].strip():
             raise TemporaryError(f"Empty visual description or scene group: {record['id']}")
-        if not set(record["character_ids"]) <= {"parent", "infant", "caregiver"}:
-            raise TemporaryError(f"Unknown shared character ID: {record['id']}")
+        if any(not character.strip() for character in record["character_ids"]):
+            raise TemporaryError(f"Blank character ID: {record['id']}")
 
 
 class Providers:
@@ -299,14 +299,10 @@ class Providers:
                          {"text": narration, "model_id": self.config.elevenlabs_model, "voice_settings": self.config.voice_settings,
                           "apply_text_normalization": "off"}, params={"output_format": "mp3_44100_128"})
 
-    def image(self, prompt: str, references: list[Path]) -> bytes:
+    def image(self, prompt: str) -> bytes:
         if self.config.image_provider == "openrouter":
-            payload = {"model": self.config.image_model, "prompt": prompt + "\n" + STYLE,
+            payload = {"model": self.config.image_model, "prompt": prompt,
                        "n": 1, "resolution": "1K", "aspect_ratio": "16:9"}
-            if references:
-                payload["input_references"] = [{"type": "image_url", "image_url": {
-                    "url": "data:image/png;base64," + base64.b64encode(reference.read_bytes()).decode("ascii")}}
-                    for reference in references]
             data = self.post("image", "https://openrouter.ai/api/v1/images",
                              {"Authorization": f"Bearer {self.key('OPENROUTER_API_KEY')}"}, payload)
             images = data.get("data")
@@ -323,9 +319,7 @@ class Providers:
                 raise TemporaryError("OpenRouter returned an empty image; retry limit applies")
             return content
 
-        parts = [{"text": prompt + "\n" + STYLE}]
-        for reference in references:
-            parts.append({"inlineData": {"mimeType": "image/png", "data": base64.b64encode(reference.read_bytes()).decode("ascii")}})
+        parts = [{"text": prompt}]
         data = self.post("image", f"https://generativelanguage.googleapis.com/v1beta/models/{quote(self.config.image_model, safe='')}:generateContent",
                          {"x-goog-api-key": self.key("GEMINI_API_KEY")},
                          {"contents": [{"role": "user", "parts": parts}],
@@ -349,8 +343,7 @@ class Providers:
         array.update(minItems=len(cues), maxItems=len(cues))
         properties = array["items"]["properties"]
         properties["id"] = {"type": "string", "enum": [cue.id for cue in cues]}
-        properties["character_ids"] = {"type": "array", "items": {
-            "type": "string", "enum": ["parent", "infant", "caregiver"]}}
+        properties["character_ids"] = {"type": "array", "items": {"type": "string", "minLength": 1}}
         for field in ("scene_group", "scene_description"):
             properties[field] = {"type": "string", "minLength": 1}
         try:

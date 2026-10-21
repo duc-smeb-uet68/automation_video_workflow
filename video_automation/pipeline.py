@@ -11,7 +11,7 @@ from PIL import Image
 
 from . import media
 from .models import Cue, Manifest, Script
-from .providers import AUDIT_PROMPT, CHARACTERS, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
+from .providers import AUDIT_PROMPT, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import aligned_words, make_script, normalize, segment_words
 
@@ -31,7 +31,7 @@ class Pipeline:
         if not topic:
             raise PipelineError("Topic cannot be empty")
         identity = {"mode": mode, "narration": script.narration} if script is not None else topic
-        job_id = job_id or "video_" + digest(identity)[:12]
+        job_id = job_id or "video_text_only_" + digest(identity)[:12]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
             raise PipelineError("Job ID must contain only letters, digits, underscores and hyphens")
         folder = config.jobs_dir / job_id
@@ -43,7 +43,7 @@ class Pipeline:
                 raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID")
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
-                                                  script_input_hash=script_input_hash, fps=config.fps))
+                                                  image_strategy="text_only", script_input_hash=script_input_hash, fps=config.fps))
         if script is not None:
             atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
         return cls(store)
@@ -181,9 +181,9 @@ class Pipeline:
         write_json(store.path("transcript.json"), [c.model_dump() for c in cues])
         store.save()
 
-    def generate_image(self, prompt, references, destination):
+    def generate_image(self, prompt, destination):
         # The provider result is validated before it becomes the approved checkpoint.
-        content = self.providers.image(prompt, references)
+        content = self.providers.image(prompt)
         try:
             with Image.open(io.BytesIO(content)) as image:
                 image.load()
@@ -199,48 +199,31 @@ class Pipeline:
         return result
 
     def images(self):
+        """Checkpoint all standalone prompts before generating one image per cue."""
         store, manifest = self.store, self.store.manifest
-        custom_reference = self.config.character_reference
-        reference_key = digest({"characters": CHARACTERS, "style": STYLE, "image_generation": self.config.image_cache_settings})
-        shared = self.config.jobs_dir / "references" / f"characters_{reference_key[:16]}.png"
-        reference_inputs = {"key": reference_key, "custom": file_hash(custom_reference) if custom_reference else None}
+        if (not manifest.cues or len({cue.id for cue in manifest.cues}) != len(manifest.cues)
+                or any(not cue.scene_description.strip() for cue in manifest.cues)):
+            raise PipelineError("Image prompts require unique cues with nonblank scene descriptions")
+        expected = [{"cue_id": cue.id, "prompt": cue.scene_description.strip() + "\n" + STYLE}
+                    for cue in manifest.cues]
 
-        def reference():
-            target = store.path("images/character_reference.png")
-            if custom_reference:
-                with Image.open(custom_reference) as image:
-                    buffer = io.BytesIO()
-                    image.convert("RGB").save(buffer, format="PNG")
-                    atomic_bytes(target, buffer.getvalue())
-                media.check_image(target)
-            else:
-                try:
-                    media.check_image(shared)
-                except PipelineError:
-                    self.generate_image(CHARACTERS, [], shared)
-                atomic_bytes(target, shared.read_bytes())
-            return {"files": ["images/character_reference.png"]}
+        def validate_prompts(records):
+            if records != expected:
+                raise TemporaryError("Image prompts must match every cue exactly once in order with its complete prompt")
 
-        store.task("image.character_reference", reference_inputs, reference)
-        character = store.path("images/character_reference.png")
-        group_references = {}
-        for cue in manifest.cues:
+        prompts = self.json_task("image.prompts", {"prompts": expected, "prompt_version": 1},
+                                 "image_prompts.json", lambda: expected, validate=validate_prompts)
+        for cue, record in zip(manifest.cues, prompts):
             relative = f"images/{cue.id}.png"
-            references = [character]
-            if cue.scene_group in group_references:
-                references.append(group_references[cue.scene_group])
-            prompt = (f"Characters in this scene: {', '.join(cue.character_ids) or 'none'}. "
-                      f"Scene group: {cue.scene_group}. {cue.scene_description}")
-            inputs = {"prompt": prompt, "style": STYLE, "image_generation": self.config.image_cache_settings,
-                      "references": [file_hash(p) for p in references]}
+            prompt = record["prompt"]
+            inputs = {"prompt": prompt, "image_generation": self.config.image_cache_settings}
 
-            def generate(relative=relative, references=references, prompt=prompt):
-                result = self.generate_image(prompt, references, store.path(relative))
+            def generate(relative=relative, prompt=prompt):
+                result = self.generate_image(prompt, store.path(relative))
                 return {"files": [relative], "validation": result}
 
             store.task(f"image.{cue.id}", inputs, generate)
             cue.image_path = relative
-            group_references.setdefault(cue.scene_group, store.path(relative))
             if cue.overlay_text:
                 overlay_relative = f"overlays/{cue.id}.png"
                 def labels(cue=cue, overlay_relative=overlay_relative):

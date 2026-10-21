@@ -41,7 +41,7 @@ class Config(Record):
     image_interval_seconds: float = Field(default=1, ge=0, le=60)
     music_path: Path | None = None
     font_path: Path | None = None
-    character_reference: Path | None = None
+    character_reference: Path | None = Field(default=None, description="Accepted for legacy configuration; ignored by text-only generation.")
     max_silence_seconds: float = Field(default=3, gt=0)
     spending_ceiling_usd: float | None = Field(default=None, gt=0)
     request_cost_caps_usd: dict[str, float] = Field(default_factory=dict)
@@ -72,7 +72,8 @@ class Config(Record):
 
     @property
     def image_cache_settings(self) -> dict:
-        return {"provider": self.image_provider, "model": self.image_model, "adapter_version": 1,
+        return {"provider": self.image_provider, "model": self.image_model, "adapter_version": 2,
+                "strategy": "text_only",
                 "resolution": "1K", "aspect_ratio": "16:9"}
 
     @model_validator(mode="after")
@@ -139,7 +140,7 @@ class Cue(Record):
     word_start: int = Field(ge=0)
     word_end: int = Field(gt=0)
     scene_group: str = ""
-    character_ids: list[str] = Field(default_factory=lambda: ["parent", "infant", "caregiver"])
+    character_ids: list[str] = Field(default_factory=list)
     scene_description: str = ""
     overlay_text: str | None = None
     motion: Literal["hold", "slow_push"] = "hold"
@@ -163,6 +164,7 @@ class Manifest(Record):
     job_id: str
     topic: str
     mode: Literal["production", "script", "fixture", "imported"] = "production"
+    image_strategy: Literal["reference", "text_only"] = "reference"
     script_input_hash: str | None = None
     status: Literal["pending", "running", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0
