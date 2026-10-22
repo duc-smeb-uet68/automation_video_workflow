@@ -1,6 +1,20 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-10-22. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
+Latest offline verification on 2026-10-22. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+
+## Native text inside generated images
+
+Branch `codex/image-native-text` removes separate text overlays. The visual planner includes exact quoted wording for optional short labels directly in each standalone scene description. The image prompt requests readable size and contrast while leaving suitable placement to the image AI. Complete prompts are saved in `image_prompts.json` before image requests, and both OpenRouter and direct Gemini receive the saved text unchanged. Native spelling, numeric accuracy, readability, and placement remain best effort without OCR verification.
+
+New generated jobs use `video_native_text_<input-hash>` IDs, `schema_version: 2`, and `image_strategy: "native_text"`. New fixtures and imported jobs also use schema version 2. Cue records and provider schemas have no `overlay_text` or `overlay_path` fields. Overlay drawing, compositing, stages, and bounds validation are removed from generation, rendering, fixtures, and Kdenlive export. The synthetic fixture includes a `38%` label drawn directly into its source image. Legacy `font_path` remains an ignored configuration input and is omitted from initialization output.
+
+Compatibility checks reject older schema versions and incompatible generated strategies before strict cue parsing or any job-file writes. Existing jobs remain on their original branch. Regression coverage checks unchanged file bytes and modification times across script, topic, fixture, and imported jobs for run, resume with retry reset, validation, and editor export. Read-only status still reads version-1 manifests containing the removed fields. New workflow cache inputs include updated visual/style prompts, image strategy/adapter settings, prompt checkpoint version, and clip-render version.
+
+Focused native-text, job isolation, provider schema, renderer, editor, configuration, and historical-status checks pass **91 tests** in **12.55 seconds**. The complete offline suite passes **243 tests** in **68.39 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/native-text-full`. This includes existing HTTP retries, image credit fallback, Gemini key rotation, usage budgets, speech alignment, timing, music ducking, real FFmpeg rendering, validation, Kdenlive export, and cached reruns.
+
+Source-image preparation preserves all pixels at 640×360 and 1920×1080 in the labeled-image checks. A decoded FFmpeg fixture frame preserves the source label's red pixels, and a cached resume preserves hashes for the source image, prepared image, narration, subtitles, and final video. The decoded fixture frame was visually inspected. CLI help also succeeds. No live generation requests were made and no retained jobs, local configuration, credentials, or source assets were changed.
+
+The following sections retain historical evidence from earlier branches; their overlay behavior and test counts do not describe the current workflow.
 
 ## Incomplete visual response recovery
 

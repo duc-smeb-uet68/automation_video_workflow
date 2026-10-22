@@ -103,7 +103,7 @@ def main(argv=None):
         if args.command == "init":
             if args.output.exists():
                 raise PipelineError(f"Configuration already exists: {args.output}")
-            data = config.model_dump(mode="json", exclude={"character_reference"})
+            data = config.model_dump(mode="json", exclude={"character_reference", "font_path"})
             data["jobs_dir"] = "jobs"
             write_json(args.output, data)
             print(str(args.output.resolve()))

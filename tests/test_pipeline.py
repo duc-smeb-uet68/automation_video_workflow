@@ -8,7 +8,8 @@ from pathlib import Path
 
 import httpx
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
+from pydantic import ValidationError
 
 from video_automation import assets, media
 from video_automation.models import Config, Cue, Manifest, Word
@@ -26,7 +27,7 @@ def config(tmp_path):
 
 @pytest.fixture
 def store(config):
-    return Store(config.jobs_dir / "test", config, Manifest(job_id="test", topic="Ancient caregivers", image_strategy="text_only"))
+    return Store(config.jobs_dir / "test", config, Manifest(job_id="test", topic="Ancient caregivers", image_strategy="native_text"))
 
 
 def narration():
@@ -77,7 +78,7 @@ class FakeProviders:
     def visuals(self, cues, previous_scenes=None):
         self.calls.append("visuals")
         return {"cues": [{"id": c.id, "scene_group": "camp", "character_ids": ["parent"],
-                          "scene_description": "Parent beside a fire.", "overlay_text": None, "motion": "hold"} for c in cues]}
+                          "scene_description": "Parent beside a fire.", "motion": "hold"} for c in cues]}
 
     def image(self, prompt):
         self.calls.append("image")
@@ -331,38 +332,47 @@ def test_prompt_change_regenerates_only_affected_image_and_revalidates_cache(sto
 
 
 @pytest.mark.parametrize("mode", ["script", "production"])
-def test_text_only_default_jobs_are_distinct_from_legacy_jobs(config, tmp_path, mode):
+@pytest.mark.parametrize("prefix", ["video_", "video_text_only_"])
+def test_native_text_default_jobs_are_distinct_from_legacy_jobs(config, tmp_path, mode, prefix):
     source = tmp_path / "narration.txt"
     source.write_text(narration(), encoding="utf-8")
     identity = {"mode": "script", "narration": narration()} if mode == "script" else "Caregivers"
-    old_folder = config.jobs_dir / ("video_" + digest(identity)[:12])
+    old_folder = config.jobs_dir / (prefix + digest(identity)[:12])
     legacy = Manifest(job_id=old_folder.name, topic="Caregivers", mode=mode).model_dump(mode="json")
     legacy.pop("image_strategy")
+    legacy["schema_version"] = 1
     write_json(old_folder / "manifest.json", legacy)
     before = (old_folder / "manifest.json").read_bytes()
     pipeline = Pipeline.create(config, script_path=source) if mode == "script" else Pipeline.create(config, "Caregivers")
-    assert pipeline.store.manifest.job_id == "video_text_only_" + digest(identity)[:12]
-    assert read_json(pipeline.store.path("manifest.json"))["image_strategy"] == "text_only"
-    assert Manifest.model_validate(legacy).image_strategy == "reference"
+    assert pipeline.store.manifest.job_id == "video_native_text_" + digest(identity)[:12]
+    saved = read_json(pipeline.store.path("manifest.json"))
+    assert saved["image_strategy"] == "native_text" and saved["schema_version"] == 2
     assert (old_folder / "manifest.json").read_bytes() == before
-    assert Store(pipeline.store.folder, config).manifest.image_strategy == "text_only"
+    assert Store(pipeline.store.folder, config).manifest.image_strategy == "native_text"
 
 
-@pytest.mark.parametrize("mode", ["script", "production"])
-@pytest.mark.parametrize("explicit_strategy", [False, True])
+@pytest.mark.parametrize("mode", ["script", "production", "fixture", "imported"])
+@pytest.mark.parametrize("strategy", [None, "reference", "text_only"])
 @pytest.mark.parametrize("command", ["run", "resume", "validate", "export-kdenlive"])
-def test_legacy_jobs_are_rejected_without_writes(config, tmp_path, monkeypatch, capsys, mode, explicit_strategy, command):
+def test_legacy_jobs_are_rejected_without_writes(config, tmp_path, monkeypatch, capsys, mode, strategy, command):
     from video_automation.cli import main
     source = tmp_path / "narration.txt"
     source.write_text(narration(), encoding="utf-8")
     legacy_folder = config.jobs_dir / "legacy"
     manifest = Manifest(job_id="legacy", topic="Caregivers", mode=mode,
                         script_input_hash=digest(narration()) if mode == "script" else None).model_dump(mode="json")
-    if not explicit_strategy:
+    manifest["schema_version"] = 1
+    manifest["cues"] = [{"id": "cue_0001", "overlay_text": "38%", "overlay_path": "overlays/cue_0001.png"}]
+    if strategy is None:
         manifest.pop("image_strategy")
+        manifest.pop("schema_version")
+    else:
+        manifest["image_strategy"] = strategy
     write_json(legacy_folder / "manifest.json", manifest)
     atomic_bytes(legacy_folder / "input_script.txt", narration().encode("utf-8"))
     atomic_bytes(legacy_folder / "images/cue_0001.png", image_bytes())
+    atomic_bytes(legacy_folder / "audio/narration.wav", b"saved audio")
+    atomic_bytes(legacy_folder / "overlays/cue_0001.png", b"saved overlay")
     before = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy_folder.rglob("*") if path.is_file()}
     settings = tmp_path / "config.json"
     settings.write_text(config.model_dump_json(), encoding="utf-8")
@@ -377,8 +387,39 @@ def test_legacy_jobs_are_rejected_without_writes(config, tmp_path, monkeypatch, 
         elif command == "export-kdenlive":
             args += ["--template", str(tmp_path / "template.kdenlive")]
     assert main(["--config", str(settings), command, *args]) == 1
-    assert "Legacy reference-based job is preserved" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "Existing job is preserved" in error
+    assert "codex/text-only-image-prompts" in error and "main" in error
     assert before == {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in legacy_folder.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("version", [None, 1, 3])
+def test_unsupported_schema_rejected_before_parsing_or_creating_files(config, version):
+    folder = config.jobs_dir / "old"
+    saved = {"schema_version": version, "mode": "fixture", "cues": [{"overlay_text": "38%"}]}
+    if version is None:
+        saved.pop("schema_version")
+    write_json(folder / "manifest.json", saved)
+    before = (folder / "manifest.json").read_bytes(), (folder / "manifest.json").stat().st_mtime_ns
+    with pytest.raises(PipelineError, match="Existing job is preserved"):
+        Store(folder, config)
+    assert before == ((folder / "manifest.json").read_bytes(), (folder / "manifest.json").stat().st_mtime_ns)
+    assert list(folder.iterdir()) == [folder / "manifest.json"]
+
+
+@pytest.mark.parametrize("strategy", [None, "reference", "text_only"])
+def test_version_two_requires_native_text_strategy_for_generated_jobs(config, strategy):
+    folder = config.jobs_dir / "wrong_strategy"
+    saved = Manifest(job_id=folder.name, topic="A topic").model_dump(mode="json")
+    if strategy is None:
+        saved.pop("image_strategy")
+    else:
+        saved["image_strategy"] = strategy
+    write_json(folder / "manifest.json", saved)
+    before = (folder / "manifest.json").read_bytes()
+    with pytest.raises(PipelineError, match="native-text generation"):
+        Store(folder, config)
+    assert (folder / "manifest.json").read_bytes() == before
 
 
 def test_source_audit_blocks_unsupported_claims(store):
@@ -471,6 +512,12 @@ def test_renderer_integration_music_and_cache(config):
     Pipeline(Store(pipeline.store.folder, config)).run()
     assert file_hash(pipeline.store.path("final.mp4")) == before
     assert all(s.attempts == 1 for s in pipeline.store.manifest.stages.values())
+    assert "overlay_bounds" not in report["checks"]
+    assert not pipeline.store.path("overlays").exists()
+    assert not any(name.startswith("overlay.") for name in pipeline.store.manifest.stages)
+    saved = read_json(pipeline.store.path("manifest.json"))
+    assert saved["schema_version"] == 2
+    assert all("overlay_text" not in cue and "overlay_path" not in cue for cue in saved["cues"])
     # Corrupting subtitles cannot silently pass validation.
     atomic_bytes(pipeline.store.path("subtitles.en.srt"), b"broken")
     with pytest.raises(PipelineError, match="caption_bounds"):
@@ -490,11 +537,7 @@ def test_kdenlive_export_uses_dynamic_manifest(config, tmp_path):
     from video_automation.kdenlive import export, properties
     import xml.etree.ElementTree as ET
     pipeline = assets.fixture(config, "editor")
-    # A label from an older fixture must be refreshed before preparing editor images.
     cue = pipeline.store.manifest.cues[-1]
-    with Image.open(pipeline.store.path(cue.overlay_path)) as labels:
-        ImageDraw.Draw(labels).rectangle((8, 8, 100, 40), fill=(255, 250, 235, 245))
-        labels.save(pipeline.store.path(cue.overlay_path))
     template = tmp_path / "template.kdenlive"
     template.write_text('''<mlt><profile/>
       <producer id="black"><property name="resource">black</property></producer>
@@ -513,7 +556,10 @@ def test_kdenlive_export_uses_dynamic_manifest(config, tmp_path):
     assert properties(chain)["resource"] == pipeline.store.path("audio/narration.wav").as_posix()
     assert all(Path(properties(p)["resource"]).is_file() for p in images)
     with Image.open(pipeline.store.path(f"render/prepared/{cue.id}.png")) as prepared, Image.open(pipeline.store.path(cue.image_path)) as original:
-        assert prepared.getpixel((32, 32)) == original.getpixel((32, 32))
+        assert ImageChops.difference(prepared, original).getbbox() is None
+    assert not pipeline.store.path("overlays").exists()
+    assert sum(len(image.findall("filter")) for image in images) == 1
+    assert pipeline.store.manifest.schema_version == 2
 
 
 def test_env_file_only_reads_provider_keys(tmp_path, monkeypatch):
@@ -542,115 +588,76 @@ def test_cli_missing_setup_fails_before_requests(config, tmp_path, monkeypatch):
     assert (config.jobs_dir / "missing_setup/failure_report.json").is_file()
 
 
-def test_overlay_rejects_unfit_text(config, tmp_path):
-    with pytest.raises(PipelineError, match="does not fit"):
-        media.overlay(config, "x"*1000, tmp_path/"bad.png")
-
-
-@pytest.mark.parametrize("text", ["38%", "Re-think: food ≠ abandoning baby", "Longer label with several words across multiple lines " * 3])
-@pytest.mark.parametrize("size", [(640, 360), (1920, 1080)])
-def test_overlay_has_only_text_on_transparent_pixels(config, tmp_path, text, size):
-    config.width, config.height = size
-    path = tmp_path / "label.png"
-    result = media.overlay(config, text, path)
-    with Image.open(path) as labels:
-        assert labels.mode == "RGBA"
-        assert labels.size == (config.width, config.height)
-        assert labels.getbbox() == tuple(result["bounds"])
-        visible = [pixel for pixel in labels.getdata() if pixel[3] > 0]
-        assert visible
-        assert {pixel[:3] for pixel in visible} == {(160, 25, 20)}
-        assert labels.getchannel("A").getextrema() == (0, 255)
-
-
 @pytest.mark.parametrize("background", ["#fffaf0", "#143860", "#28b369"])
-def test_overlay_composition_preserves_background_outside_text(config, tmp_path, background):
-    source, overlay, prepared = (tmp_path / name for name in ("source.png", "label.png", "prepared.png"))
-    Image.new("RGB", (config.width, config.height), background).save(source)
-    media.overlay(config, "38%", overlay)
-    media.prepare_image(config, source, prepared, overlay)
-    with Image.open(overlay) as labels, Image.open(source) as original, Image.open(prepared) as combined:
-        for label, before, after in zip(labels.getdata(), original.getdata(), combined.getdata()):
-            if label[3] == 0:
-                assert after == before
-            elif label[3] == 255:
-                assert after == (160, 25, 20)
+@pytest.mark.parametrize("size", [(640, 360), (1920, 1080)])
+def test_prepare_image_preserves_native_text_and_all_source_pixels(config, tmp_path, background, size):
+    config.width, config.height = size
+    source, prepared = tmp_path / "source.png", tmp_path / "prepared.png"
+    image = Image.new("RGB", size, background)
+    ImageDraw.Draw(image).text((30, 30), "38%", fill=(255, 0, 0), font_size=32)
+    image.save(source)
+    media.prepare_image(config, source, prepared)
+    with Image.open(prepared) as result:
+        assert ImageChops.difference(image, result).getbbox() is None
 
 
-def test_overlay_cache_upgrade_preserves_generated_images_and_speech(store):
-    provider = FakeProviders()
-    cue = Cue(id="cue_0001", text="Exact overlay: 38%", start=0, end=1, word_start=0, word_end=3,
-              scene_description="A scientist with a blue coat beside a lab bench.", overlay_text="38%")
-    store.manifest.cues = [cue]
-    pipeline = Pipeline(store, provider)
-    pipeline.images()
-    atomic_bytes(store.path("audio/narration.wav"), b"saved speech")
-    original_hashes = {name: file_hash(store.path(name)) for name in (cue.image_path, "audio/narration.wav")}
-    with Image.open(store.path(cue.overlay_path)) as labels:
-        ImageDraw.Draw(labels).rectangle((8, 8, 100, 40), fill=(255, 250, 235, 245))
-        labels.save(store.path(cue.overlay_path))
-    legacy_inputs = {"text": cue.overlay_text, "width": store.config.width, "height": store.config.height,
-                     "font": "system-default-v1"}
-    stage = store.manifest.stages[f"overlay.{cue.id}"]
-    stage.input_hash = digest(legacy_inputs)
-    stage.artifacts[cue.overlay_path] = file_hash(store.path(cue.overlay_path))
-    store.save()
-    resumed = Pipeline(Store(store.folder, store.config), provider)
-    resumed.images()
-    with Image.open(store.path(cue.overlay_path)) as labels:
-        assert labels.getpixel((32, 32))[3] == 0
-    assert provider.calls == ["image"]
-    assert original_hashes == {name: file_hash(store.path(name)) for name in original_hashes}
-    before = file_hash(store.path(cue.overlay_path))
-    resumed.images()
-    assert file_hash(store.path(cue.overlay_path)) == before
-    assert resumed.store.manifest.stages[f"overlay.{cue.id}"].attempts == 1
-
-
-def test_cached_video_refreshes_old_overlay_and_preserves_background(config, monkeypatch, tmp_path):
-    pipeline = assets.fixture(config, "transparent_overlay")
-    provider = FakeProviders()
-    pipeline.providers = provider
-    cue = pipeline.store.manifest.cues[-1]
-    original_overlay = media.overlay
-
-    def legacy_overlay(settings, text, output):
-        result = original_overlay(settings, text, output)
-        panel = Image.new("RGBA", (settings.width, settings.height))
-        ImageDraw.Draw(panel).rounded_rectangle((8, 8, settings.width-8, 100), radius=12, fill=(255, 250, 235, 245))
-        with Image.open(output) as labels:
-            panel = Image.alpha_composite(panel, labels)
-        panel.save(output)
-        return {**result, "bounds": list(panel.getbbox())}
-
-    with monkeypatch.context() as patch:
-        patch.setattr(media, "overlay", legacy_overlay)
-        assert pipeline.run()["passed"]
+def test_native_text_fixture_survives_video_render_and_cached_resume(config, tmp_path):
+    pipeline = assets.fixture(config, "native_text_fixture")
     store = pipeline.store
-    old_overlay_hash = file_hash(store.path(cue.overlay_path))
-    old_video_hash = file_hash(store.path("final.mp4"))
-    preserved = {name: file_hash(store.path(name)) for name in (
-        "audio/narration.wav", *(c.image_path for c in store.manifest.cues), "render/clips/cue_0001.mp4", "render/clips/cue_0002.mp4")}
-    # Reproduce a completed checkpoint from before overlay renderer versioning.
-    store.manifest.stages[f"overlay.{cue.id}"].input_hash = digest({
-        "text": cue.overlay_text, "width": config.width, "height": config.height, "font": "system-default-v1"})
-    store.save()
-    resumed = Pipeline(Store(store.folder, config), provider)
-    assert resumed.run()["passed"]
-    assert file_hash(store.path(cue.overlay_path)) != old_overlay_hash
-    assert file_hash(store.path("final.mp4")) != old_video_hash
-    assert preserved == {name: file_hash(store.path(name)) for name in preserved}
-    assert provider.calls == []
-    with Image.open(store.path(cue.overlay_path)) as labels:
-        assert labels.getpixel((32, 32))[3] == 0
-    frame = tmp_path / "transparent_overlay_frame.png"
+    cue = store.manifest.cues[-1]
+    with Image.open(store.path(cue.image_path)) as source:
+        expected_red = {(x, y) for x in range(30, 120) for y in range(20, 70)
+                        if source.getpixel((x, y)) == (160, 25, 20)}
+    assert len(expected_red) > 100
+    assert pipeline.run()["passed"]
+    frame = tmp_path / "native_text_frame.png"
     media.ffmpeg(config, "-loglevel", "error", "-ss", "2.5", "-i", store.path("final.mp4"),
                  "-frames:v", 1, "-threads", 1, frame)
-    with Image.open(frame) as decoded, Image.open(store.path(cue.image_path)) as original:
-        assert max(abs(a-b) for a, b in zip(decoded.convert("RGB").getpixel((32, 32)), original.getpixel((32, 32)))) <= 4
-    final_hash = file_hash(store.path("final.mp4"))
-    assert resumed.run()["passed"]
-    assert file_hash(store.path("final.mp4")) == final_hash
+    with Image.open(frame) as decoded:
+        preserved_red = sum(1 for point in expected_red
+                            if decoded.getpixel(point)[0] > decoded.getpixel(point)[1] + 50
+                            and decoded.getpixel(point)[0] > decoded.getpixel(point)[2] + 50)
+    assert preserved_red >= len(expected_red) * 0.95
+    before = {name: file_hash(store.path(name)) for name in (
+        "audio/narration.wav", cue.image_path, "render/prepared/cue_0003.png", "final.mp4", "subtitles.en.srt")}
+    assert Pipeline(Store(store.folder, config)).run()["passed"]
+    assert before == {name: file_hash(store.path(name)) for name in before}
+    assert not store.path("overlays").exists()
+    assert not any(name.startswith("overlay.") for name in store.manifest.stages)
+
+
+@pytest.mark.parametrize("field", ["overlay_text", "overlay_path"])
+def test_new_cue_schema_rejects_removed_overlay_fields(field):
+    record = Cue(id="cue_0001", text="A scene.", start=0, end=1, word_start=0, word_end=2).model_dump()
+    record[field] = "old overlay"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Cue.model_validate(record)
+
+
+def test_native_text_visual_plan_and_images_preserve_planned_wording(store):
+    provider = FakeProviders()
+    original = provider.visuals
+    def visuals(cues, previous_scenes=None):
+        planned = original(cues, previous_scenes)
+        planned["cues"][0]["scene_description"] += ' Draw the exact label "38%" within the image in a suitable location.'
+        planned["cues"][1]["motion"] = "slow_push"
+        return planned
+    provider.visuals = visuals
+    pipeline = Pipeline(store, provider)
+    words = visual_words(store, 8)
+    pipeline.visuals(words)
+    assert len(store.manifest.cues) == 2
+    assert [cue.motion for cue in store.manifest.cues] == ["hold", "slow_push"]
+    pipeline.images()
+    prompts = read_json(store.path("image_prompts.json"))
+    assert '"38%"' in prompts[0]["prompt"] and '"38%"' not in prompts[1]["prompt"]
+    assert all("overlay_text" not in cue and "overlay_path" not in cue for cue in read_json(store.path("transcript.json")))
+    before = list(provider.calls)
+    resumed = Pipeline(Store(store.folder, store.config), provider)
+    resumed.visuals(words)
+    resumed.images()
+    assert provider.calls == before
+    assert not store.path("overlays").exists()
 
 
 def test_script_mode_normalizes_skips_research_and_resumes_from_snapshot(config, tmp_path, monkeypatch):
@@ -873,7 +880,7 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
             return httpx.Response(200, json={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"cues": [\n' + ' '*100}]}]})
         plan = {"cues": [{"id": value, "scene_group": "camp", "character_ids": [],
-                         "scene_description": "A campfire.", "overlay_text": None, "motion": "hold"} for value in ids]}
+                         "scene_description": "A campfire.", "motion": "hold"} for value in ids]}
         return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
             "content": [{"type": "output_text", "text": json.dumps(plan)}]}]})
     original_client = httpx.Client

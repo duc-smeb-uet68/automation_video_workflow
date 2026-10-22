@@ -15,8 +15,10 @@ from .store import PipelineError, TemporaryError, digest, write_json
 STYLE = """Hand-drawn 2D educational doodle, flat solid colors, bold black slightly wobbly
 marker outlines, simple round white heads, dot eyes, thin black limbs and mitten hands.
 Cream or flat-color background. No gradients, shadows, photographic texture, photorealism,
-3D or anime. Widescreen 16:9. Do not draw text, labels, numbers or watermarks.
-Keep the top quarter clear for optional exact text overlays."""
+3D or anime. Widescreen 16:9. Draw text only when requested by the scene prompt, using
+the exact quoted wording. Make requested text readable with suitable size and contrast.
+Choose a suitable location within the image without covering important characters or
+objects or clipping text at the edges. Omit unnecessary text. No watermarks."""
 
 SCRIPT_PROMPT = """Given the topic, write an English narration script of approximately
 4,500–5,000 characters, including spaces, punctuation, and line breaks. Use a calm,
@@ -53,9 +55,13 @@ objects, spatial relationships, background, and camera framing. Repeat the full 
 of recurring characters in every scene where they appear. Use previous scene descriptions
 as text-only planning context to maintain continuity, but never refer to previous scenes,
 reference images, "the same character", or any information outside the current description.
-Fixed doodle style is added in code. Put exact names, percentages and
-important numbers in overlay_text; never request drawn text. Keep overlays short. Label
-reconstructions when needed. Use only hold or slow_push; text-heavy or diagram scenes use
+Fixed doodle style is added in code. Decide whether short text helps explain each scene.
+When needed, include exact quoted wording for names, percentages, important numbers or
+brief labels directly in scene_description and ask the image AI to draw it as part of
+the image. Request readable text with suitable size and contrast, and let the image AI
+choose a suitable location that does not obscure important scene content or clip text.
+Omit text instructions when text is unnecessary; do not add narration captions or invent
+facts. Label reconstructions when needed. Use only hold or slow_push; text-heavy or diagram scenes use
 hold. Preserve visual continuity using the supplied previous scenes."""
 
 
@@ -74,7 +80,7 @@ AUDIT_SCHEMA = object_schema({"sentences": {"type": "array", "items": object_sch
     "source_urls": STRINGS, "reason": STRING})}})
 VISUAL_SCHEMA = object_schema({"cues": {"type": "array", "items": object_schema({
     "id": STRING, "scene_group": STRING, "character_ids": STRINGS, "scene_description": STRING,
-    "overlay_text": {"type": ["string", "null"]}, "motion": {"type": "string", "enum": ["hold", "slow_push"]}})}})
+    "motion": {"type": "string", "enum": ["hold", "slow_push"]}})}})
 
 
 def gemini_keys() -> list[str]:

@@ -32,7 +32,7 @@ class Pipeline:
         if not topic:
             raise PipelineError("Topic cannot be empty")
         identity = {"mode": mode, "narration": script.narration} if script is not None else topic
-        job_id = job_id or "video_text_only_" + digest(identity)[:12]
+        job_id = job_id or "video_native_text_" + digest(identity)[:12]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
             raise PipelineError("Job ID must contain only letters, digits, underscores and hyphens")
         folder = config.jobs_dir / job_id
@@ -44,7 +44,7 @@ class Pipeline:
                 raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID")
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
-                                                  image_strategy="text_only", script_input_hash=script_input_hash, fps=config.fps))
+                                                  image_strategy="native_text", script_input_hash=script_input_hash, fps=config.fps))
         if script is not None:
             atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
         return cls(store)
@@ -175,11 +175,9 @@ class Pipeline:
         if [r["id"] for r in records] != [c.id for c in cues]:
             raise PipelineError("Visual plan must cover every cue ID exactly once in order")
         for cue, record in zip(cues, records):
-            for field in ("scene_group", "character_ids", "scene_description", "overlay_text", "motion"):
+            for field in ("scene_group", "character_ids", "scene_description", "motion"):
                 setattr(cue, field, record[field])
             Cue.model_validate(cue.model_dump())
-            if cue.overlay_text:
-                cue.motion = "hold"
         manifest.cues = cues
         write_json(store.path("transcript.json"), [c.model_dump() for c in cues])
         store.save()
@@ -214,7 +212,7 @@ class Pipeline:
             if records != expected:
                 raise TemporaryError("Image prompts must match every cue exactly once in order with its complete prompt")
 
-        prompts = self.json_task("image.prompts", {"prompts": expected, "prompt_version": 1},
+        prompts = self.json_task("image.prompts", {"prompts": expected, "prompt_version": 2},
                                  "image_prompts.json", lambda: expected, validate=validate_prompts)
         for cue, record in zip(manifest.cues, prompts):
             relative = f"images/{cue.id}.png"
@@ -234,7 +232,6 @@ class Pipeline:
 
             store.task(f"image.{cue.id}", inputs, generate)
             cue.image_path = relative
-            media.ensure_overlay(store, cue)
             store.save()
 
     def run(self):

@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -24,7 +25,7 @@ def png(color="#fffaf0"):
 def store(tmp_path):
     config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice",
         "max_attempts": 2, "retry_backoff_seconds": 0, "image_interval_seconds": 0})
-    return Store(config.jobs_dir / "images", config, Manifest(job_id="images", topic="Caregivers", image_strategy="text_only"))
+    return Store(config.jobs_dir / "images", config, Manifest(job_id="images", topic="Caregivers", image_strategy="native_text"))
 
 
 def mock_http(monkeypatch, handler):
@@ -209,6 +210,7 @@ def test_complete_prompt_list_is_saved_before_text_only_requests(store, monkeypa
         word_start=index-1, word_end=index, character_ids=["scientist"], scene_group="lab",
         scene_description=f"Scientist with short black hair and a blue coat examines sample {index} at a white lab bench.")
         for index in range(1, 3)]
+    store.manifest.cues[0].scene_description += ' Draw the exact label "38%" with readable size and contrast in a suitable location.'
     captured = []
 
     def handler(request):
@@ -235,6 +237,10 @@ def test_complete_prompt_list_is_saved_before_text_only_requests(store, monkeypa
     pipeline = Pipeline(store)
     assert pipeline.images() is None
     assert len(captured) == 2
+    assert '"38%"' in captured[0] and '"38%"' not in captured[1]
+    assert not store.path("overlays").exists()
+    assert not any(name.startswith("overlay.") for name in store.manifest.stages)
+    assert all("overlay_text" not in cue.model_dump() and "overlay_path" not in cue.model_dump() for cue in store.manifest.cues)
     assert not store.path("images/character_reference.png").exists()
     assert not (store.config.jobs_dir / "references").exists()
     assert "image.character_reference" not in store.manifest.stages
@@ -253,6 +259,22 @@ def test_ignored_character_reference_does_not_block_doctor_or_config_load(store,
     monkeypatch.setattr(media, "run", lambda command: "version")
     assert doctor(loaded) == 0
     assert "character_reference" not in json.loads(capsys.readouterr().out)["checks"]
+
+
+def test_ignored_font_path_loads_and_is_omitted_from_init(store, monkeypatch, capsys):
+    settings = store.folder / "config.json"
+    settings.write_text(store.config.model_copy(update={"font_path": Path("missing-font.ttf")}).model_dump_json(), encoding="utf-8")
+    loaded = Config.load(settings)
+    assert loaded.font_path == Path("missing-font.ttf")
+    for key in loaded.generation_keys:
+        monkeypatch.setenv(key, "fixture-key")
+    monkeypatch.setattr(media, "run", lambda command: "version")
+    assert doctor(loaded) == 0
+    assert "font_path" not in json.loads(capsys.readouterr().out)["checks"]
+    output = store.folder / "new-config.json"
+    assert main(["--config", str(settings), "init", "--output", str(output)]) == 0
+    initialized = read_json(output)
+    assert "font_path" not in initialized and "character_reference" not in initialized
 
 
 def test_image_http_400_keeps_redacted_upstream_reason_and_request_id(store, monkeypatch):

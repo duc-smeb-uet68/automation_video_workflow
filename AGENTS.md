@@ -16,7 +16,7 @@ This repository contains a Python CLI that turns a narration file into a narrate
 
 Runtime: Python 3.11+, Pydantic 2, Pillow, httpx, and jsonschema. Tests use pytest. FFmpeg and ffprobe must be installed, with `libx264`, `loudnorm`, and `sidechaincompress` available.
 
-Read `README.md` for usage, `IMPLEMENTATION_STATUS.md` for recorded verification and deferred acceptance, and `video_automation_plan.md` for the original design. Prefer current code and tests when the original plan differs; text generation now defaults to OpenRouter rather than direct OpenAI.
+Read `README.md` for usage, `IMPLEMENTATION_STATUS.md` for recorded verification and deferred acceptance, and `video_automation_plan.md` for the original design. Prefer current code and tests when the original plan differs; text generation defaults to OpenRouter. Branch `codex/image-native-text` uses standalone prompts and lets the image AI draw optional short text directly inside each image, without reference images or separate text overlays.
 
 ## Structure and ownership
 
@@ -29,7 +29,7 @@ Read `README.md` for usage, `IMPLEMENTATION_STATUS.md` for recorded verification
 | `video_automation/providers.py` | Provider HTTP calls, prompts, JSON schemas, research provenance, and fixed visual style. |
 | `video_automation/store.py` | Atomic writes, hashes, checkpoints, retries, usage reservations, path bounds, and worker lock. |
 | `video_automation/timing.py` | Narration normalization, sentence/word alignment, cue segmentation, absolute frame boundaries, and SRT. |
-| `video_automation/media.py` | Image checks, overlays, FFmpeg rendering, audio finishing, and final validation. |
+| `video_automation/media.py` | Image checks and preparation, FFmpeg rendering, audio finishing, and final validation. |
 | `video_automation/assets.py` | Synthetic renderer fixtures and legacy asset import. |
 | `video_automation/kdenlive.py` | Optional editable project export from a supplied Kdenlive template. |
 | `tests/test_pipeline.py` | Offline provider contracts, pipeline invariants, recovery, and real FFmpeg integration. |
@@ -50,11 +50,11 @@ if (-not (Test-Path config.local.json)) { & .\.venv\Scripts\python.exe -m video_
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Configure `voice_id` locally. The code defaults to OpenRouter text model `openai/gpt-oss-120b`, ElevenLabs speech model `eleven_multilingual_v2`, and OpenRouter image model `google/gemini-3.1-flash-lite-image`. Direct OpenAI text generation is optional through `text_provider: "openai"` and `openai_model`. Direct Gemini images are optional through `image_provider: "gemini"` and `gemini_model`. There is no automatic application-level provider fallback.
+Configure `voice_id` locally. The code defaults to OpenRouter text model `openai/gpt-oss-120b`, ElevenLabs speech model `eleven_multilingual_v2`, and OpenRouter image model `google/gemini-3.1-flash-lite-image`. Direct OpenAI text generation is optional through `text_provider: "openai"` and `openai_model`. Direct Gemini images are optional through `image_provider: "gemini"` and `gemini_model`. OpenRouter image credit failures can fall back to Gemini when its key pool is configured; text generation has no automatic provider fallback.
 
 The selected text provider requires `OPENROUTER_API_KEY` or `OPENAI_API_KEY`. The selected image provider requires `OPENROUTER_API_KEY` or `GEMINI_API_KEY`. The default text/image routes share one OpenRouter key; speech requires `ELEVENLABS_API_KEY`. Nonempty process environment values take precedence over `.env`. Never print, commit, or copy credential values into reports, manifests, or logs.
 
-The CLI automatically loads `config.local.json` from the working directory. Put the global `--config` option before the subcommand to select another file. Relative jobs, music, font, and character reference paths resolve against the configuration directory; `.env` loads from that directory too. `Config.load()` checks `D:/kenlive/bin` for FFmpeg tools when default executable names are unavailable on PATH. Avoid adding machine-specific paths elsewhere.
+The CLI automatically loads `config.local.json` from the working directory. Put the global `--config` option before the subcommand to select another file. Relative jobs and music paths resolve against the configuration directory; `.env` loads from that directory too. Legacy `font_path` and `character_reference` settings are accepted but ignored by generation and omitted from `init` output. `Config.load()` checks `D:/kenlive/bin` for FFmpeg tools when default executable names are unavailable on PATH. Avoid adding machine-specific paths elsewhere.
 
 ```powershell
 & .\.venv\Scripts\python.exe -m video_automation --help
@@ -72,7 +72,7 @@ The default `input_mode` is `script`: `run narration.txt` or `run --script narra
 3. In topic mode, audit every sentence against research. Reject unsupported claims, missing coverage, and references outside retrieved sources before paid speech or image generation. Script mode skips this audit explicitly.
 4. Send the exact normalized narration to ElevenLabs. Decode audio to WAV and derive word/sentence timing from original character alignment. Reject text mismatches instead of inventing timestamps.
 5. Build dynamic cues from aligned words. Plan visuals in batches of 24 while preserving every cue ID and its order.
-6. Generate images sequentially. Reuse the shared character reference and the first approved image within each scene group. Render exact labels with Pillow; overlays require stationary scenes.
+6. Save the complete ordered prompts in `image_prompts.json`, then generate one image per cue sequentially. The planner includes exact quoted short labels in `scene_description` only when needed. The image AI draws the text and chooses readable placement that avoids important scene content. Do not create reference images, overlay PNGs, or text-compositing stages. Text-heavy and diagram scenes use `hold`; image text remains best effort without OCR verification.
 7. Render clips, assemble `rough.mp4`, finish audio, write separate SRT subtitles, and validate `final.mp4`. Mark the job completed only after validation passes.
 
 Preserve these additional constraints:
@@ -85,7 +85,9 @@ Preserve these additional constraints:
 
 ## Jobs, recovery, and costs
 
-Default job folders use `jobs/video_<input-hash>/`; script identity includes normalized narration and mode, while topic identity retains the original topic hash. `--job-id` supplies an administrative name and rejects changed inputs or modes. `manifest.json` holds state, attempts, cues, usage, and artifact hashes. `execution.jsonl` records events. Key outputs include `input_script.txt` in script mode, `sources.json` and `source_audit.json` in topic mode, and shared `script.txt`, `script.json`, `alignment.json`, `transcript.json`, image/overlay folders, `rough.mp4`, `final.mp4`, `subtitles.en.srt`, and `quality_report.json`.
+Default job folders use `jobs/video_native_text_<input-hash>/`; script identity includes normalized narration and mode, while topic identity retains the original topic hash. `--job-id` supplies an administrative name and rejects changed inputs or modes. New jobs use `schema_version: 2`, and generated jobs require `image_strategy: "native_text"`. Cue records have no `overlay_text` or `overlay_path`. Reject incompatible saved jobs before strict parsing or any job-file writes. Continue older text-only jobs on `codex/text-only-image-prompts`, and reference-based jobs on `main`; never migrate or regenerate them automatically. Read-only `status` must remain compatible with historical manifests.
+
+`manifest.json` holds state, attempts, cues, usage, and artifact hashes. `execution.jsonl` records events. Key outputs include `input_script.txt` in script mode, `sources.json` and `source_audit.json` in topic mode, and shared `script.txt`, `script.json`, `alignment.json`, `transcript.json`, `image_prompts.json`, images, `rough.mp4`, `final.mp4`, `subtitles.en.srt`, and `quality_report.json`.
 
 Use `Store.task()` for reusable work and list all output files in its result. Completed stages are reusable only when input hashes and output hashes match. Include changed prompts, models, settings, reference hashes, or an explicit version in affected cache inputs. A code change alone does not automatically invalidate cached stages. Write artifacts with the existing atomic helpers and resolve job-relative paths through `Store.path()`.
 
@@ -113,7 +115,7 @@ Run focused tests for changed behavior, then the full suite when changing pipeli
 & .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-Provider tests are offline. Several pipeline tests run real FFmpeg, including rendering, music ducking, overlays, validation, and cached reruns. Reuse `FakeProviders` and HTTP mocks; do not introduce live requests into automated tests. No formatter, linter, or type-check command is currently configured in `pyproject.toml`.
+Provider tests are offline. Several pipeline tests run real FFmpeg, including rendering, music ducking, preservation of source-image text, validation, and cached reruns. Reuse `FakeProviders` and HTTP mocks; do not introduce live requests into automated tests. No formatter, linter, or type-check command is currently configured in `pyproject.toml`.
 
 If Windows cannot create pytest's default temporary directory, use disposable workspace storage. Pytest clears its `--basetemp` directory, so never point it at jobs or other retained artifacts:
 
@@ -129,7 +131,7 @@ For a manual renderer smoke test without credentials, use a new fixture job ID:
 & .\.venv\Scripts\python.exe -m video_automation resume codex_renderer_fixture
 ```
 
-`fixture` renders immediately and rejects an existing job; use `resume` for subsequent runs. The synthetic fixture exercises three scenes and an exact `38%` overlay. Use `import-assets` for legacy files and `export-kdenlive JOB_ID --template PATH` for optional editor export; preserve original source assets. See `README.md` for arguments.
+`fixture` renders immediately and rejects an existing job; use `resume` for subsequent runs. The synthetic fixture exercises three scenes and a `38%` label already present in a source image. It does not prove generated text quality. Use `import-assets` for legacy source files and `export-kdenlive JOB_ID --template PATH` for optional editor export; preserve original source assets. New fixture/imported jobs use schema version 2, while older jobs stay on their original branch. See `README.md` for arguments.
 
 The recorded live topic-to-video acceptance remains deferred in `IMPLEMENTATION_STATUS.md`. Offline tests and imported exports do not verify provider account access, actual costs, generated factual quality, or artistic continuity. State exactly which checks ran and whether any live acceptance occurred.
 

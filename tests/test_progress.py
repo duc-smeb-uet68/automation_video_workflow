@@ -123,6 +123,8 @@ def test_status_is_read_only_and_available_while_worker_is_locked(store, tmp_pat
         # Historical manifests remain readable without constructing a writing Store.
         manifest = store.manifest.model_dump(mode="json")
         manifest["mode"] = "production"
+        manifest["schema_version"] = 1
+        manifest["cues"][0].update(overlay_text="38%", overlay_path="overlays/cue_0001.png")
         manifest.pop("image_strategy")
         store.path("manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         before = snapshot_files(store.folder)

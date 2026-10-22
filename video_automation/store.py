@@ -83,10 +83,15 @@ class Store:
     def __init__(self, folder: Path, config, manifest: Manifest | None = None):
         self.folder = folder.resolve()
         self.config = config
-        self.manifest = manifest or Manifest.model_validate(read_json(self.folder / "manifest.json"))
-        if self.manifest.mode in {"production", "script"} and self.manifest.image_strategy != "text_only":
-            raise PipelineError("Legacy reference-based job is preserved; create a new text-only job on this branch "
-                                "or use main to continue the existing job")
+        saved = manifest.model_dump(mode="json") if manifest is not None else read_json(self.folder / "manifest.json")
+        # Reject incompatible jobs before parsing removed fields or writing any artifacts.
+        if saved.get("schema_version", 1) != 2 or (
+                saved.get("mode", "production") in {"production", "script"}
+                and saved.get("image_strategy", "reference") != "native_text"):
+            raise PipelineError("Existing job is preserved: this branch requires schema_version 2 and native-text generation. "
+                                "Continue text-only overlay jobs on codex/text-only-image-prompts, "
+                                "or reference-based jobs on main; create a new job here.")
+        self.manifest = manifest or Manifest.model_validate(saved)
         self.progress = None
         self.progress_stream = None
         self.folder.mkdir(parents=True, exist_ok=True)

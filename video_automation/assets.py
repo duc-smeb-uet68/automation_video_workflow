@@ -106,7 +106,7 @@ def fixture(config, job_id="renderer_fixture"):
     media.ffmpeg(config, "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=3.117", "-c:a", "pcm_s16le", audio)
     store.manifest.audio_path = "audio/narration.wav"
     store.manifest.audio_duration = media.audio_duration(config, audio)
-    texts = ["Renderer fixture: stationary scene.", "Gentle camera movement remains restrained.", "Exact overlay: 38%"]
+    texts = ["Renderer fixture: stationary scene.", "Gentle camera movement remains restrained.", "Source image label: 38%"]
     for index, (text, color) in enumerate(zip(texts, ["#f2dfb3", "#c6d9b4", "#e9d0ad"])):
         relative = f"images/cue_{index+1:04}.png"
         image = Image.new("RGB", (640, 360), color)
@@ -115,15 +115,15 @@ def fixture(config, job_id="renderer_fixture"):
         draw.line((320, 210, 320, 320), fill="black", width=5)
         draw.ellipse((290, 135, 300, 145), fill="black")
         draw.ellipse((340, 135, 350, 145), fill="black")
+        if index == 2:
+            # The fixture simulates text already drawn inside a provider's source image.
+            draw.text((40, 30), "38%", fill=(160, 25, 20), font_size=32)
         buffer = io.BytesIO()
         image.save(buffer, "PNG")
         atomic_bytes(store.path(relative), buffer.getvalue())
         cue = Cue(id=f"cue_{index+1:04}", text=text, start=float(index), end=min(index+0.9, store.manifest.audio_duration),
                   word_start=index*5, word_end=(index+1)*5, image_path=relative,
                   motion="slow_push" if index == 1 else "hold")
-        if index == 2:
-            cue.overlay_text, cue.overlay_path = "38%", "overlays/cue_0003.png"
-            media.overlay(config, cue.overlay_text, store.path(cue.overlay_path))
         store.manifest.cues.append(cue)
     script = make_script("\n\n".join(texts), enforce_length=False)
     atomic_bytes(store.path("script.txt"), script.narration.encode("utf-8"))

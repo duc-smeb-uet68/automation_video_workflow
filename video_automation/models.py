@@ -40,7 +40,7 @@ class Config(Record):
     request_timeout_seconds: float = Field(default=180, ge=1, le=600)
     image_interval_seconds: float = Field(default=1, ge=0, le=60)
     music_path: Path | None = None
-    font_path: Path | None = None
+    font_path: Path | None = Field(default=None, description="Accepted for legacy configuration; ignored by native-text generation.")
     character_reference: Path | None = Field(default=None, description="Accepted for legacy configuration; ignored by text-only generation.")
     max_silence_seconds: float = Field(default=3, gt=0)
     spending_ceiling_usd: float | None = Field(default=None, gt=0)
@@ -72,8 +72,8 @@ class Config(Record):
 
     @property
     def image_cache_settings(self) -> dict:
-        settings = {"provider": self.image_provider, "model": self.image_model, "adapter_version": 2,
-                    "strategy": "text_only", "resolution": "1K", "aspect_ratio": "16:9"}
+        settings = {"provider": self.image_provider, "model": self.image_model, "adapter_version": 3,
+                    "strategy": "native_text", "resolution": "1K", "aspect_ratio": "16:9"}
         if self.image_provider == "openrouter":
             settings["gemini_fallback_model"] = self.gemini_model
         return settings
@@ -91,7 +91,7 @@ class Config(Record):
         data = json.loads(path.read_text(encoding="utf-8-sig")) if path else {}
         config = cls.model_validate(data)
         base = path.resolve().parent if path else Path.cwd()
-        for name in ("jobs_dir", "music_path", "font_path", "character_reference"):
+        for name in ("jobs_dir", "music_path", "character_reference"):
             value = getattr(config, name)
             if value is not None and not value.is_absolute():
                 setattr(config, name, (base / value).resolve())
@@ -144,10 +144,8 @@ class Cue(Record):
     scene_group: str = ""
     character_ids: list[str] = Field(default_factory=list)
     scene_description: str = ""
-    overlay_text: str | None = None
     motion: Literal["hold", "slow_push"] = "hold"
     image_path: str | None = None
-    overlay_path: str | None = None
     start_frame: int = 0
     end_frame: int = 0
 
@@ -162,11 +160,11 @@ class Stage(Record):
 
 
 class Manifest(Record):
-    schema_version: int = 1
+    schema_version: Literal[2] = 2
     job_id: str
     topic: str
     mode: Literal["production", "script", "fixture", "imported"] = "production"
-    image_strategy: Literal["reference", "text_only"] = "reference"
+    image_strategy: Literal["reference", "text_only", "native_text"] = "native_text"
     script_input_hash: str | None = None
     status: Literal["pending", "running", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0

@@ -14,7 +14,7 @@ from video_automation.store import PipelineError, Store, TemporaryError, read_js
 @pytest.fixture
 def store(tmp_path):
     config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice"})
-    return Store(config.jobs_dir / "routing", config, Manifest(job_id="routing", topic="Caregivers", image_strategy="text_only"))
+    return Store(config.jobs_dir / "routing", config, Manifest(job_id="routing", topic="Caregivers", image_strategy="native_text"))
 
 
 def response(result, annotations=None):
@@ -335,7 +335,7 @@ def visual_cues():
 @pytest.fixture
 def visual_plan(visual_cues):
     return {"cues": [{"id": cue.id, "scene_group": "camp", "character_ids": ["parent"],
-                      "scene_description": "A parent by the fire.", "overlay_text": None, "motion": "hold"}
+                      "scene_description": "A parent by the fire.", "motion": "hold"}
                      for cue in visual_cues]}
 
 
@@ -356,6 +356,8 @@ def test_visual_request_schema_constrains_batch_without_mutating_shared_schema(s
     assert schema["items"]["properties"]["id"]["enum"] == ["cue_0025", "cue_0026"]
     assert "enum" not in schema["items"]["properties"]["scene_description"]
     assert "enum" not in schema["items"]["properties"]["character_ids"]["items"]
+    assert "overlay_text" not in schema["items"]["properties"]
+    assert "overlay_path" not in schema["items"]["properties"]
     assert json.dumps(VISUAL_SCHEMA, sort_keys=True) == before
 
 
@@ -371,7 +373,7 @@ def test_visual_planner_accepts_narration_specific_characters(store, monkeypatch
     assert visual_cues[0].character_ids == []
 
 
-@pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "reordered", "character", "blank", "json"])
+@pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "reordered", "character", "blank", "json", "overlay"])
 def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_cues, visual_plan, invalid):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
     if invalid == "count":
@@ -386,6 +388,8 @@ def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_
         visual_plan["cues"][0]["character_ids"] = [" "]
     elif invalid == "blank":
         visual_plan["cues"][0]["scene_group"] = " "
+    elif invalid == "overlay":
+        visual_plan["cues"][0]["overlay_text"] = "38%"
     output = response(visual_plan)
     if invalid == "json":
         output["output"][0]["content"][0]["text"] = "not JSON"
@@ -393,6 +397,33 @@ def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_
     monkeypatch.setattr(client, "post", lambda *args: output)
     with pytest.raises(TemporaryError):
         client.visuals(visual_cues)
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "openai"])
+def test_visual_planner_requests_optional_native_text_and_image_chosen_placement(store, monkeypatch, visual_cues, visual_plan, provider):
+    from video_automation.providers import STYLE
+    store.config.text_provider = provider
+    monkeypatch.setenv(store.config.text_key_env, "fixture-key")
+    visual_plan["cues"][0]["scene_description"] = 'A parent beside a fire. Draw the short label "38%" within the image.'
+    requests = []
+    client = Providers(store)
+    def post(operation, url, headers, payload):
+        requests.append(payload)
+        return response(visual_plan)
+    monkeypatch.setattr(client, "post", post)
+    result = client.visuals(visual_cues)
+    assert result == visual_plan
+    assert '"38%"' in result["cues"][0]["scene_description"]
+    assert '"38%"' not in result["cues"][1]["scene_description"]
+    instructions = requests[0]["input"][1]["content"][0]["text"]
+    assert "exact quoted wording" in instructions
+    assert "Omit text instructions when text is unnecessary" in instructions
+    assert "let the image AI" in instructions and "suitable location" in instructions
+    assert "readable text with suitable size and contrast" in instructions
+    assert "text-heavy or diagram scenes use\nhold" in instructions
+    assert "overlay_text" not in instructions
+    for forbidden in ("Do not draw text", "never request drawn text", "top quarter", "overlays"):
+        assert forbidden not in instructions + STYLE
 
 
 def test_visual_refusal_remains_non_retryable(store, monkeypatch, visual_cues):

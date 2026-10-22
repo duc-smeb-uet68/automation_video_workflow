@@ -6,14 +6,10 @@ import re
 import subprocess
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageOps
 
-from .models import Cue
 from .store import PipelineError, atomic_bytes, file_hash, write_json
 from .timing import assign_frames, normalize, subtitles
-
-
-OVERLAY_VERSION = 2
 
 
 def run(command: list[str]) -> str:
@@ -57,72 +53,9 @@ def check_image(path: Path) -> dict:
         raise PipelineError(f"Invalid image {path.name}: {exc}") from exc
 
 
-def overlay(config, text: str, output: Path) -> dict:
-    width, height = config.width, config.height
-    font_paths = [config.font_path, Path("C:/Windows/Fonts/arialbd.ttf"),
-                  Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")]
-    font_path = next((p for p in font_paths if p and p.is_file()), None)
-    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(canvas)
-    margin = max(16, width // 24)
-    allowed_width = width - margin * 4
-    for size in range(max(16, height // 20), 11, -1):
-        font = ImageFont.truetype(str(font_path), size) if font_path else ImageFont.load_default(size=size)
-        lines = []
-        for word in text.split():
-            candidate = f"{lines[-1]} {word}" if lines else word
-            if draw.textlength(candidate, font=font) <= allowed_width:
-                if lines:
-                    lines[-1] = candidate
-                else:
-                    lines.append(word)
-            else:
-                lines.append(word)
-        wrapped = "\n".join(lines)
-        box = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=6)
-        if box[2] - box[0] <= allowed_width and box[3] - box[1] <= height * 0.25:
-            break
-    else:
-        raise PipelineError("Overlay text does not fit in the configured frame")
-    if not wrapped:
-        raise PipelineError("Overlay text is empty")
-    box_width = box[2] - box[0]
-    left = (width - box_width) // 2
-    top = margin * 2
-    draw.multiline_text((left-box[0], top-box[1]), wrapped, font=font, fill=(160, 25, 20, 255), spacing=6, align="center")
-    bounds = canvas.getbbox()
-    if not bounds or not (0 <= bounds[0] < bounds[2] <= width and 0 <= bounds[1] < bounds[3] <= height):
-        raise PipelineError("Overlay exceeds frame bounds")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output)
-    return {"text": text, "bounds": list(bounds)}
-
-
-def ensure_overlay(store, cue: Cue) -> Path | None:
-    """Refresh cached labels when their text, font, dimensions, or renderer changes."""
-    if cue.overlay_text:
-        config = store.config
-        relative = cue.overlay_path or f"overlays/{cue.id}.png"
-
-        def labels():
-            result = overlay(config, cue.overlay_text, store.path(relative))
-            return {"files": [relative], "layout": result}
-
-        store.task(f"overlay.{cue.id}", {"text": cue.overlay_text, "width": config.width,
-                   "height": config.height, "font": file_hash(config.font_path) if config.font_path else "system-default-v1",
-                   "overlay_version": OVERLAY_VERSION}, labels)
-        if cue.overlay_path != relative:
-            cue.overlay_path = relative
-            store.save()
-    return store.path(cue.overlay_path) if cue.overlay_path else None
-
-
-def prepare_image(config, source: Path, destination: Path, overlay_path: Path | None):
+def prepare_image(config, source: Path, destination: Path):
     with Image.open(source) as image:
         image = ImageOps.pad(image.convert("RGB"), (config.width, config.height), color="#fffaf0")
-        if overlay_path:
-            with Image.open(overlay_path) as labels:
-                image = Image.alpha_composite(image.convert("RGBA"), labels.convert("RGBA")).convert("RGB")
         destination.parent.mkdir(parents=True, exist_ok=True)
         image.save(destination)
 
@@ -137,17 +70,16 @@ def render(store):
         image = store.path(cue.image_path)
         check_image(image)
         clip_relative = f"render/clips/{cue.id}.mp4"
-        overlay_path = ensure_overlay(store, cue)
-        inputs = {"image": file_hash(image), "overlay": file_hash(overlay_path) if overlay_path else None,
+        inputs = {"image": file_hash(image), "render_version": 2,
                   "frames": cue.end_frame-cue.start_frame, "motion": cue.motion,
                   "settings": config.model_dump(include={"width", "height", "fps", "crf", "encoder_preset"})}
 
-        def encode(cue=cue, image=image, overlay_path=overlay_path, relative=clip_relative):
+        def encode(cue=cue, image=image, relative=clip_relative):
             prepared = store.path(f"render/prepared/{cue.id}.png")
-            prepare_image(config, image, prepared, overlay_path)
+            prepare_image(config, image, prepared)
             frames = cue.end_frame - cue.start_frame
-            # Reuse the original builder's restrained 1.5% centered push. Labels remain stationary.
-            if cue.motion == "slow_push" and not cue.overlay_text:
+            # Reuse the original builder's restrained 1.5% centered push.
+            if cue.motion == "slow_push":
                 filters = (f"zoompan=z='1+0.015*on/{max(1, frames-1)}':x='iw/2-iw/zoom/2':"
                            f"y='ih/2-ih/zoom/2':d={frames}:s={config.width}x{config.height}:fps={config.fps}")
             else:
@@ -312,20 +244,6 @@ def validate(store) -> dict:
     check("caption_bounds", lambda: all(0 <= c.start < c.end <= manifest.audio_duration + 0.001 for c in manifest.cues)
           and store.path("subtitles.en.srt").read_text(encoding="utf-8") == subtitles(manifest.cues, manifest.audio_duration))
 
-    def overlays():
-        for cue in manifest.cues:
-            if cue.overlay_text:
-                with Image.open(store.path(cue.overlay_path)) as image:
-                    bounds = image.getbbox()
-                    if image.size != (config.width, config.height) or not bounds:
-                        return False
-                    if not (0 <= bounds[0] < bounds[2] <= config.width and 0 <= bounds[1] < bounds[3] <= config.height):
-                        return False
-                if cue.motion != "hold":
-                    return False
-        return True
-
-    check("overlay_bounds", overlays)
     try:
         info = probe(config, store.path("final.mp4"))
         video = next(s for s in info["streams"] if s["codec_type"] == "video")

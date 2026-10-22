@@ -7,7 +7,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .media import ensure_overlay, prepare_image
+from .media import prepare_image
 from .store import PipelineError, atomic_bytes
 from .timing import assign_frames
 
@@ -66,7 +66,7 @@ def export(store, template: Path):
     for index, cue in enumerate(manifest.cues, 1):
         count = cue.end_frame-cue.start_frame
         prepared = store.path(f"render/prepared/{cue.id}.png")
-        prepare_image(config, store.path(cue.image_path), prepared, ensure_overlay(store, cue))
+        prepare_image(config, store.path(cue.image_path), prepared)
         producer = copy.deepcopy(original)
         producer_id = f"image_{index:04}"
         producer.set("id", producer_id)
@@ -79,7 +79,7 @@ def export(store, template: Path):
                             "kdenlive:id": 9+index, "kdenlive:control_uuid": "{"+str(uuid.uuid4())+"}",
                             "kdenlive:folderid": 6, "kdenlive:clipname": cue.id}.items():
             put(producer, name, value)
-        if cue.motion == "slow_push" and not cue.overlay_text:
+        if cue.motion == "slow_push":
             effect = ET.SubElement(producer, "filter", attrib={"in": "0", "out": str(count-1)})
             for name, value in {"mlt_service": "affine", "kdenlive:id": "affine", "kdenlive:effectname": "Transform",
                                 "kdenlive:ix": 1, "transition.fill": 1, "transition.distort": 0,
