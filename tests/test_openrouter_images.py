@@ -23,7 +23,7 @@ def png(color="#fffaf0"):
 
 @pytest.fixture
 def store(tmp_path):
-    config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice",
+    config = Config.load().model_copy(update={"image_mode": "api", "jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice",
         "max_attempts": 2, "retry_backoff_seconds": 0, "image_interval_seconds": 0})
     return Store(config.jobs_dir / "images", config, Manifest(job_id="images", topic="Caregivers", image_strategy="native_text"))
 
@@ -54,7 +54,7 @@ def test_requested_image_default():
     ("openai", "gemini", ("OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY")),
 ])
 def test_generation_keys_follow_both_providers(text, image, keys):
-    assert Config(text_provider=text, image_provider=image).generation_keys == keys
+    assert Config(text_provider=text, image_provider=image, image_mode="api").generation_keys == keys
 
 
 def test_image_http_contract_text_only_and_usage(store, monkeypatch):

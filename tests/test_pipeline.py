@@ -21,7 +21,7 @@ from video_automation.timing import aligned_words, assign_frames, make_script, n
 
 @pytest.fixture
 def config(tmp_path):
-    return Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "width": 640, "height": 360,
+    return Config.load().model_copy(update={"image_mode": "api", "jobs_dir": tmp_path / "jobs", "width": 640, "height": 360,
                                            "image_interval_seconds": 0, "retry_backoff_seconds": 0, "max_attempts": 2})
 
 

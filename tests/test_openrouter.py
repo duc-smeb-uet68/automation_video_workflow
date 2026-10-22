@@ -13,7 +13,7 @@ from video_automation.store import PipelineError, Store, TemporaryError, read_js
 
 @pytest.fixture
 def store(tmp_path):
-    config = Config.load().model_copy(update={"jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice"})
+    config = Config.load().model_copy(update={"image_mode": "api", "jobs_dir": tmp_path / "jobs", "voice_id": "fixture-voice"})
     return Store(config.jobs_dir / "routing", config, Manifest(job_id="routing", topic="Caregivers", image_strategy="native_text"))
 
 

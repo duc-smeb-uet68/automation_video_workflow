@@ -95,7 +95,8 @@ class Store:
         self.progress = None
         self.progress_stream = None
         self.folder.mkdir(parents=True, exist_ok=True)
-        self.save()
+        if manifest is not None:
+            self.save()
 
     def path(self, relative: str) -> Path:
         path = (self.folder / relative).resolve()

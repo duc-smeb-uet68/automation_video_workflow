@@ -126,6 +126,7 @@ def test_status_is_read_only_and_available_while_worker_is_locked(store, tmp_pat
         manifest["schema_version"] = 1
         manifest["cues"][0].update(overlay_text="38%", overlay_path="overlays/cue_0001.png")
         manifest.pop("image_strategy")
+        manifest.pop("image_mode")
         store.path("manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         before = snapshot_files(store.folder)
         with worker_lock(store.config.jobs_dir):
@@ -133,7 +134,7 @@ def test_status_is_read_only_and_available_while_worker_is_locked(store, tmp_pat
             assert main(["--config", str(settings), "status", str(target)]) == 0
         report = json.loads(capsys.readouterr().out)
         assert report == {"job_id": "progress", "mode": "production", "status": "pending",
-                          "error": None, "progress_available": False}
+                          "image_mode": "api", "error": None, "progress_available": False}
         assert snapshot_files(store.folder) == before
 
 

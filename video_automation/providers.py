@@ -352,6 +352,8 @@ class Providers:
                           "apply_text_normalization": "off"}, params={"output_format": "mp3_44100_128"})
 
     def image(self, prompt: str) -> bytes:
+        if self.store.manifest.image_mode == "external":
+            raise PipelineError("Image API calls are disabled for external-image jobs")
         if self.config.image_provider == "openrouter" and not self.openrouter_image_credit_exhausted:
             payload = {"model": self.config.image_model, "prompt": prompt,
                        "n": 1, "resolution": "1K", "aspect_ratio": "16:9"}

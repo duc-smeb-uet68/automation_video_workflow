@@ -14,7 +14,14 @@ from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
 from .providers import AUDIT_PROMPT, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
-from .timing import aligned_words, make_script, normalize, segment_words
+from .timing import aligned_words, make_script, normalize, segment_words, subtitles
+
+
+class ImagesPending(Exception):
+    """A normal handoff to the user, with no failed stage or retry consumed."""
+
+    def __init__(self, report):
+        self.report = report
 
 
 class Pipeline:
@@ -32,6 +39,8 @@ class Pipeline:
         if not topic:
             raise PipelineError("Topic cannot be empty")
         identity = {"mode": mode, "narration": script.narration} if script is not None else topic
+        if config.image_mode == "external":
+            identity = {"input": identity, "image_mode": "external"}
         job_id = job_id or "video_native_text_" + digest(identity)[:12]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
             raise PipelineError("Job ID must contain only letters, digits, underscores and hyphens")
@@ -39,12 +48,15 @@ class Pipeline:
         if (folder / "manifest.json").is_file():
             store = Store(folder, config)
             if (store.manifest.mode != mode
+                    or store.manifest.image_mode != config.image_mode
                     or (script is None and store.manifest.topic != topic)
                     or (script is not None and store.manifest.script_input_hash != script_input_hash)):
-                raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID")
+                raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID. "
+                                    "Use resume --image-mode to change an existing job's image mode explicitly.")
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
-                                                  image_strategy="native_text", script_input_hash=script_input_hash, fps=config.fps))
+                                                  image_strategy="native_text", image_mode=config.image_mode,
+                                                  script_input_hash=script_input_hash, fps=config.fps))
         if script is not None:
             atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
         return cls(store)
@@ -179,7 +191,9 @@ class Pipeline:
                 setattr(cue, field, record[field])
             Cue.model_validate(cue.model_dump())
         manifest.cues = cues
+        manifest.total_frames = cues[-1].end_frame
         write_json(store.path("transcript.json"), [c.model_dump() for c in cues])
+        atomic_bytes(store.path("subtitles.en.srt"), subtitles(cues, manifest.audio_duration).encode("utf-8"))
         store.save()
 
     def generate_image(self, prompt, destination):
@@ -214,6 +228,9 @@ class Pipeline:
 
         prompts = self.json_task("image.prompts", {"prompts": expected, "prompt_version": 2},
                                  "image_prompts.json", lambda: expected, validate=validate_prompts)
+        if manifest.image_mode == "external":
+            self.external_images(prompts)
+            return
         for cue, record in zip(manifest.cues, prompts):
             relative = f"images/{cue.id}.png"
             prompt = record["prompt"]
@@ -233,6 +250,36 @@ class Pipeline:
             store.task(f"image.{cue.id}", inputs, generate)
             cue.image_path = relative
             store.save()
+
+    def external_images(self, prompts):
+        """Validate user-supplied files and checkpoint them without calling providers."""
+        store, manifest = self.store, self.store.manifest
+        store.path("images").mkdir(parents=True, exist_ok=True)
+        report = {"status": "ready", "image_mode": "external", "total_images": len(prompts),
+                  "ready_images": 0, "missing_images": [], "invalid_images": [], "expected_images": []}
+        for cue, record in zip(manifest.cues, prompts):
+            relative = f"images/{cue.id}.png"
+            report["expected_images"].append({"cue_id": cue.id, "path": relative})
+            cue.image_path = None
+            try:
+                path = store.path(relative)
+                if not path.is_file():
+                    report["missing_images"].append(relative)
+                    continue
+                validation = media.check_image(path)
+                inputs = {"prompt": record["prompt"], "source": "external", "image": validation["sha256"], "version": 1}
+                store.task(f"image.{cue.id}", inputs, lambda relative=relative, validation=validation: {
+                    "files": [relative], "validation": validation, "source": "external"})
+                cue.image_path = relative
+                report["ready_images"] += 1
+            except (PipelineError, OSError) as exc:
+                report["invalid_images"].append({"path": relative, "error": str(exc)})
+        if report["missing_images"] or report["invalid_images"]:
+            report["status"] = "waiting_for_images"
+        write_json(store.path("external_images.json"), report)
+        store.save()
+        if report["status"] == "waiting_for_images":
+            raise ImagesPending(report)
 
     def run(self):
         store, manifest = self.store, self.store.manifest
@@ -261,6 +308,12 @@ class Pipeline:
             store.save()
             progress.finish("completed")
             return report
+        except ImagesPending as pending:
+            manifest.status, manifest.error = "waiting_for_images", None
+            store.save()
+            store.log("waiting_for_images", ready=pending.report["ready_images"], total=pending.report["total_images"])
+            progress.finish("waiting_for_images")
+            return pending.report
         except KeyboardInterrupt:
             manifest.status, manifest.error = "interrupted", "Interrupted; completed checkpoints are preserved"
             store.save()

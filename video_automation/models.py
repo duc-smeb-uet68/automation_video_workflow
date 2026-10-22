@@ -15,6 +15,7 @@ class Record(BaseModel):
 class Config(Record):
     jobs_dir: Path = Path("jobs")
     input_mode: Literal["script", "topic"] = "script"
+    image_mode: Literal["external", "api"] = "external"
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     text_provider: Literal["openrouter", "openai"] = "openrouter"
@@ -64,7 +65,10 @@ class Config(Record):
 
     @property
     def generation_keys(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys((self.text_key_env, "ELEVENLABS_API_KEY", self.image_key_env)))
+        keys = (self.text_key_env, "ELEVENLABS_API_KEY")
+        if self.image_mode == "api":
+            keys += (self.image_key_env,)
+        return tuple(dict.fromkeys(keys))
 
     @property
     def text_cache_settings(self) -> dict:
@@ -165,8 +169,10 @@ class Manifest(Record):
     topic: str
     mode: Literal["production", "script", "fixture", "imported"] = "production"
     image_strategy: Literal["reference", "text_only", "native_text"] = "native_text"
+    # Jobs saved before external images existed retain their original API workflow.
+    image_mode: Literal["external", "api"] = "api"
     script_input_hash: str | None = None
-    status: Literal["pending", "running", "failed", "completed", "interrupted"] = "pending"
+    status: Literal["pending", "running", "waiting_for_images", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0
     fps: int = 30
     audio_path: str | None = None

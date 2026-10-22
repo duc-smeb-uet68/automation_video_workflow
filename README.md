@@ -1,6 +1,6 @@
 # Educational video automation
 
-A Python CLI turns a supplied narration file into timed speech, visual plans, sequential images, and a validated video. Branch `codex/image-native-text` asks the image AI to draw any needed short text directly inside the image. The visual planner specifies exact quoted wording in each standalone scene prompt, and the image AI chooses suitable placement. Requests contain the saved prompt without reference images. Script-file input is the default. An explicit topic mode also performs bounded research, script generation, and source auditing as described in `video_automation_plan.md`. Jobs use atomic local manifests. One worker owns the jobs directory at a time. Generation uses provider APIs without browser steps.
+A Python CLI turns a supplied narration file into timed speech, visual plans, images, and a validated video. External-image mode is the default: the CLI prepares narration, audio, alignment, subtitles, and standalone image prompts, then waits for you to generate the images elsewhere and copy them into the job's `images/` directory. Resume validates and adopts the supplied files before rendering. Optional API-image mode generates images automatically. Branch `codex/image-native-text` requests any needed short text directly inside the image; the planner specifies exact quoted wording, and the image AI chooses suitable placement. Script-file input is the default. Explicit topic mode also performs bounded research, script generation, and source auditing. Jobs use atomic local manifests, and one worker owns the jobs directory at a time.
 
 ## Setup
 
@@ -12,7 +12,7 @@ python -m video_automation init
 Copy-Item .env.example .env
 ```
 
-Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRouter is the default provider for both text (`openai/gpt-oss-120b`) and images (`google/gemini-3.1-flash-lite-image`). One OpenRouter key covers both stages. Add Gemini keys to enable automatic image fallback when OpenRouter credits are exhausted; an empty pool does not prevent OpenRouter setup. Set `voice_id` in `config.local.json` to an ElevenLabs voice available to your account. Existing process environment variables take precedence over `.env`. The loader supports simple `KEY=value` lines, optionally quoted; it does not expand shell expressions. Keys are never stored in the manifest or execution log.
+Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRouter remains the default text provider (`openai/gpt-oss-120b`), including visual prompt planning, so external-image mode still needs its text key. External-image mode requires no image-provider credentials and makes no image API calls or image cost reservations. With `text_provider: "openai"`, only `OPENAI_API_KEY` and `ELEVENLABS_API_KEY` are needed for preparation. API-image mode defaults to OpenRouter images (`google/gemini-3.1-flash-lite-image`); optional Gemini keys enable image credit fallback. Set `voice_id` to an ElevenLabs voice available to your account. Nonempty process environment variables take precedence over `.env`. Keys are never stored in manifests or execution logs.
 
 `init` detects the existing `D:/kenlive/bin` FFmpeg installation when the tools are not on PATH. All other installations can set executable paths in configuration. Relative music and jobs paths resolve against the configuration file's directory. Legacy `character_reference` and `font_path` settings remain accepted but are ignored by setup checks and generation, and omitted from newly initialized configuration. `config.local.json` loads automatically when running from this directory; `--config` selects another setup file. `config.example.json` documents the main settings.
 
@@ -21,7 +21,41 @@ python -m video_automation doctor
 python -m video_automation run .\narration.txt
 ```
 
-The narration file is the only per-video content input in the default mode. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The selected model IDs are explicit defaults; account access must be checked during setup. The configured speech models all accept the complete 4,500–5,000-character script in one request.
+The narration file is the initial per-video content input. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The configured speech models accept the complete 4,500–5,000-character script in one request.
+
+## External images and API images
+
+`image_mode` defaults to `"external"`, including when existing configuration omits it. It is independent of the script/topic `input_mode`.
+
+```powershell
+python -m video_automation run .\narration.txt
+```
+
+The command prepares `script.txt`, `audio/narration.wav`, `alignment.json`, `transcript.json`, `subtitles.en.srt`, and `image_prompts.json`. If images are missing or invalid, it returns success with `status: "waiting_for_images"`, the job ID, prompt path, image directory, and report path. It does not mark the job completed, create placeholder images, or render a partial video. `external_images.json` lists every expected filename and any missing or invalid files.
+
+Generate one image per saved prompt in your external AI, then copy the results as `images/cue_0001.png`, `images/cue_0002.png`, and so on inside that job. Filenames must match cue IDs. Images must be valid raster files, approximately 16:9 and at least 320×180; 1920×1080 matches the default output. External-image mode never overwrites these supplied files. Then run:
+
+```powershell
+python -m video_automation resume JOB_ID
+```
+
+Resume reuses valid preparation checkpoints, validates and records file hashes for supplied images, and renders when all expected images are ready. Partial or invalid copies leave the job waiting without consuming image attempts. Repeated resumes do not call image APIs. Replacing an image and resuming adopts the replacement and rebuilds affected clips and final output. Image-provider model/key settings do not invalidate external-image checkpoints. Text and speech can still incur charges if their own checkpoints need regeneration.
+
+Existing jobs saved before this feature retain API-image mode when resumed. To explicitly use external images for an existing schema-version-2 native-text job:
+
+```powershell
+python -m video_automation resume JOB_ID --image-mode external
+```
+
+To generate images through provider APIs instead, select it explicitly; this can incur image-generation charges:
+
+```powershell
+python -m video_automation run .\narration.txt --image-mode api
+python -m video_automation resume JOB_ID --image-mode api
+python -m video_automation doctor --image-mode api
+```
+
+Image mode is saved in each manifest. Resume uses the saved mode unless explicitly overridden. Default job identities distinguish external-image jobs from API-image jobs for the same input, preserving older API job IDs. Reusing an explicit job ID with a different image mode is rejected; use the explicit resume override to change it.
 
 ## Input modes
 
@@ -80,13 +114,13 @@ The active setup in `config.local.json` uses:
 }
 ```
 
-Image requests use OpenRouter's dedicated `POST /api/v1/images` API and the same `OPENROUTER_API_KEY` as text generation. Each request asks for one 1K image at 16:9. The request contains only a text prompt and generation settings; `input_references` is omitted. The direct Gemini route also sends only text parts. Returned base64 raster images pass the existing file/dimension checks before being checkpointed. Usage and available cost data are retained in the manifest. Missing, empty, malformed, or invalid images receive bounded retries; successful images and voiceover remain cached.
+In `image_mode: "api"`, image requests use OpenRouter's dedicated `POST /api/v1/images` API and the same `OPENROUTER_API_KEY` as text generation. Each request asks for one 1K image at 16:9. The request contains only a text prompt and generation settings; `input_references` is omitted. The direct Gemini route also sends only text parts. Returned base64 raster images pass the existing file/dimension checks before being checkpointed. Usage and available cost data are retained in the manifest. Missing, empty, malformed, or invalid images receive bounded retries; successful images and voiceover remain cached.
 
 Change `openrouter_image_model` to choose another text-to-image model supporting the configured resolution/aspect ratio. Image settings have their own cache keys, including provider, model, Gemini fallback model, and native-text strategy version. Changing them regenerates affected images without invalidating unchanged research, narration, speech, or visual planning. Existing primary image checkpoints are adopted when adding the fallback setting, retaining artifact checks and persisted retry attempts. Changing credential values does not invalidate successful images. Each image depends on its exact prompt rather than earlier image files. Changes rebuild affected outputs within native-text jobs; older jobs remain untouched.
 
-The visual planner writes complete scene descriptions in batches of 24 cues. Each description specifies visible characters and their appearance, actions, setting, objects, composition, and colors. Recurring characters repeat their appearance details. Previous scene descriptions may provide text-only context to the planner; the image model receives only the current prompt. The pipeline appends the fixed doodle style exactly once and checkpoints the complete ordered list in `image_prompts.json` before the first image request. Each record has `cue_id` and `prompt`; the saved prompt is the exact text sent to the image provider. There is no additional prompt-generation request or review pause. Full visual consistency remains a live-quality acceptance check.
+The visual planner writes complete scene descriptions in batches of 24 cues. Each description specifies visible characters and their appearance, actions, setting, objects, composition, and colors. Recurring characters repeat their appearance details. Previous scene descriptions may provide text-only context to the planner; the image model receives only the current prompt. The pipeline appends the fixed doodle style exactly once and checkpoints the complete ordered list in `image_prompts.json` before the first image request. Each record has `cue_id` and `prompt`; the saved prompt is the exact text sent to the image provider. There is no additional prompt-generation request. External-image mode pauses for the supplied files; API-image mode proceeds immediately. Full visual consistency remains a live-quality acceptance check.
 
-Keep `image_provider` set to `openrouter` to use OpenRouter first. On an image HTTP 402 credit error, the current invocation switches to direct Gemini for that image and subsequent images. Temporary OpenRouter in-flight budget errors retain bounded retries. Authentication failures, rate limits, moderation errors, malformed images, and server or transport failures do not trigger provider fallback. Each new invocation tries OpenRouter first for uncached images, allowing a replenished account to resume primary generation. Text generation continues to use the configured text provider and has no Gemini fallback.
+In API-image mode, keep `image_provider` set to `openrouter` to use OpenRouter first. On an image HTTP 402 credit error, the current invocation switches to direct Gemini for that image and subsequent images. Temporary OpenRouter in-flight budget errors retain bounded retries. Authentication failures, rate limits, moderation errors, malformed images, and server or transport failures do not trigger provider fallback. Each new invocation tries OpenRouter first for uncached images, allowing a replenished account to resume primary generation. Text generation continues to use the configured text provider and has no Gemini fallback.
 
 Configure the ordered Gemini key pool in the configuration directory's local `.env` file:
 
@@ -94,13 +128,13 @@ Configure the ordered Gemini key pool in the configuration directory's local `.e
 GEMINI_API_KEY=["your-first-key", "your-second-key"]
 ```
 
-Use one line. A legacy single key or comma-separated list also works; duplicate keys are tried only once. `[]` disables the pool. Existing nonempty process environment values take precedence. `doctor` reports the fallback model and configured key count without printing keys. For direct Gemini (`image_provider: "gemini"`), an empty pool fails setup.
+Use one line. A legacy single key or comma-separated list also works; duplicate keys are tried only once. `[]` disables the pool. Existing nonempty process environment values take precedence. `doctor` reports the fallback model and configured key count without printing keys. For direct Gemini in API-image mode (`image_provider: "gemini"`), an empty pool fails setup. External-image mode does not inspect or require the Gemini pool.
 
 Gemini uses `gemini_model` for both fallback and direct generation, with the current code default `gemini-3.1-flash-lite-image`. An older local setup may retain another model and should be checked before enabling fallback. Requests send the same saved text-only prompt, with no reference images. The pool starts at its first key and retains a working key for subsequent images. HTTP 402 or 429 advances to the next key; other failures retain the existing permanent/temporary error policy. Pool exhaustion stops or uses the stage's bounded backoff retries for rate limits. A new invocation starts the pool again. [Gemini rate limits apply per project](https://ai.google.dev/gemini-api/docs/rate-limits), so multiple keys from one project share quota. Live model access, account credits, and image quality still require authenticated verification.
 
 ## Artifacts
 
-Each input receives a stable job directory, `jobs/video_native_text_<input-hash>/`. Topic mode hashes the topic; script mode hashes the normalized narration and its mode. `--job-id` provides an optional administrative name. New manifests use `schema_version: 2`; generated jobs record `image_strategy: "native_text"`. Cue records have no `overlay_text` or `overlay_path` fields.
+Each input receives a stable job directory, `jobs/video_native_text_<input-hash>/`. API-image jobs retain the original topic/script hashes; external-image jobs additionally hash their image mode to keep their default directories distinct. `--job-id` provides an optional administrative name. New manifests use `schema_version: 2`; generated jobs record `image_strategy: "native_text"`. Cue records have no `overlay_text` or `overlay_path` fields.
 
 This workflow applies only to new jobs. Older manifests and incompatible generated strategies are rejected before strict cue parsing or any job-file writes, including explicit job IDs, resume, validation, and editor export. Continue schema-version-1 text-only overlay jobs on `codex/text-only-image-prompts`, and reference-based jobs on `main`. Existing fixtures and imported jobs also remain on their original branch. New fixtures and imports use schema version 2. Read-only `status` remains available for older jobs. No existing job is migrated or regenerated automatically.
 
@@ -114,6 +148,7 @@ This workflow applies only to new jobs. Older manifests and incompatible generat
 | `source_audit.json` | Separate model audit of every sentence's source support; topic mode only |
 | `audio/narration.wav`, `alignment.json` | Final decoded audio and character, word, sentence timing |
 | `transcript.json`, `visuals/` | Permanent cue IDs and scene plans |
+| `external_images.json` | Expected image paths, valid image count, and missing/invalid file details in external-image mode |
 | `image_prompts.json` | Ordered `{cue_id, prompt}` list containing the exact complete text for each image request |
 | `images/` | One validated image per cue, with any requested text drawn by the image AI |
 | `render/prepared/`, `render/clips/`, `render/clips.txt` | Prepared image plates, encoded cue clips, and concatenation order |
@@ -166,7 +201,7 @@ The doodle style lives in code. Characters and appearance descriptions are chose
 
 The visual planner requests text only when short names, percentages, important numbers, or labels help explain a scene. It places exact quoted wording in `scene_description`, and the image AI draws the requested text with readable size and contrast in a suitable location that avoids important scene content and frame edges. Scenes without useful text omit text instructions. The complete image prompt, including these instructions, is saved before generation and sent unchanged to OpenRouter or Gemini. There are no separate label PNGs, overlay checkpoints, or text-compositing steps. Text is part of the source image in both the MP4 and Kdenlive export. Generated spelling, numbers, readability, and placement are best effort and require visual review; there is no OCR verification or deterministic text guarantee. Narration subtitles remain a separate SRT file.
 
-Audio finishing uses two-pass loudness normalization. Optional local music loops, fades, and ducks under speech. Validation decodes the final file and checks image coverage, spoken-text coverage, timeline continuity, frame count, format, duration agreement within one frame, caption bounds, peaks, and long silences in both narration and final audio. Failed validation writes a report and marks the job failed.
+Audio finishing uses two-pass loudness normalization. Optional local music loops, fades, and ducks under speech. Validation decodes the final file and checks image coverage, spoken-text coverage, timeline continuity, frame count, format, duration agreement within one frame, caption bounds, peaks, and long silences in both narration and final audio. Failed validation writes a report and marks the job failed. Missing or invalid external images instead leave preparation in `waiting_for_images` before rendering or validation begins.
 
 ## Cost controls
 

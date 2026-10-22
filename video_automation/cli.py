@@ -58,9 +58,12 @@ def doctor(config):
     checks["music_file"] = not config.music_path or config.music_path.is_file()
     print(json.dumps({"ready_for_live_generation": all(checks.values()),
                       "text_provider": config.text_provider, "text_model": config.text_model,
-                      "image_provider": config.image_provider, "image_model": config.image_model,
+                      "image_mode": config.image_mode,
+                      "image_provider": config.image_provider if config.image_mode == "api" else None,
+                      "image_model": config.image_model if config.image_mode == "api" else None,
                       "image_fallback": {"provider": "gemini", "model": config.gemini_model,
-                                         "configured_keys": len(gemini_keys())} if config.image_provider == "openrouter" else None,
+                                         "configured_keys": len(gemini_keys())}
+                          if config.image_mode == "api" and config.image_provider == "openrouter" else None,
                       "checks": checks}, indent=2))
     return 0 if all(checks.values()) else 1
 
@@ -69,7 +72,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Resumable educational video production")
     parser.add_argument("--config", type=Path, help="JSON setup file; defaults to config.local.json when present")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("doctor", help="Check local tools and credential presence without revealing secrets")
+    doctor_command = commands.add_parser("doctor", help="Check local tools and credential presence without revealing secrets")
+    doctor_command.add_argument("--image-mode", choices=("external", "api"), help="Override configured image mode for setup checks")
     setup = commands.add_parser("init", help="Write setup configuration without overwriting an existing file")
     setup.add_argument("--output", type=Path, default=Path("config.local.json"))
     run = commands.add_parser("run", help="Produce a video from a narration file (default) or an explicit topic")
@@ -77,9 +81,11 @@ def main(argv=None):
     run.add_argument("--mode", choices=("script", "topic"), help="Input mode; defaults to input_mode in configuration (script)")
     run.add_argument("--script", type=Path, help="UTF-8 narration file; selects script mode without a positional input")
     run.add_argument("--job-id")
+    run.add_argument("--image-mode", choices=("external", "api"), help="Use external images (default) or generate through image APIs")
     resume = commands.add_parser("resume", help="Resume an existing job with successful checkpoints preserved")
     resume.add_argument("job")
     resume.add_argument("--retry-failed", action="store_true", help="Explicitly grant failed stages one new bounded retry batch")
+    resume.add_argument("--image-mode", choices=("external", "api"), help="Explicitly change the job's saved image mode")
     status = commands.add_parser("status", help="Read saved workflow progress without taking the worker lock")
     status.add_argument("job")
     validation = commands.add_parser("validate", help="Validate final video and write quality_report.json")
@@ -99,6 +105,8 @@ def main(argv=None):
     try:
         config_path = args.config or (Path("config.local.json") if Path("config.local.json").is_file() else None)
         config = Config.load(config_path)
+        if args.command in {"run", "doctor"} and args.image_mode is not None:
+            config.image_mode = args.image_mode
         load_credentials((config_path.resolve().parent if config_path else Path.cwd()) / ".env")
         if args.command == "init":
             if args.output.exists():
@@ -157,6 +165,10 @@ def main(argv=None):
                     from .kdenlive import export
                     print(str(export(store, args.template)))
                     return 0
+                if args.image_mode is not None:
+                    store.manifest.image_mode = args.image_mode
+                    store.log("image_mode_selected", image_mode=args.image_mode)
+                    store.save()
                 if args.retry_failed:
                     for stage in store.manifest.stages.values():
                         if stage.status in {"failed", "running"}:
@@ -165,10 +177,19 @@ def main(argv=None):
                     store.save()
                 pipeline = Pipeline(store)
             pipeline.store.progress_stream = sys.stderr
-            pipeline.run()
-            print(json.dumps({"status": pipeline.store.manifest.status, "mode": pipeline.store.manifest.mode,
-                              "video": str(pipeline.store.path("final.mp4")), "subtitles": str(pipeline.store.path("subtitles.en.srt")),
-                              "report": str(pipeline.store.path("quality_report.json"))}, indent=2))
+            report = pipeline.run()
+            result = {"status": pipeline.store.manifest.status, "mode": pipeline.store.manifest.mode,
+                      "job_id": pipeline.store.manifest.job_id, "image_mode": pipeline.store.manifest.image_mode,
+                      "subtitles": str(pipeline.store.path("subtitles.en.srt"))}
+            if pipeline.store.manifest.status == "waiting_for_images":
+                result.update(prompts=str(pipeline.store.path("image_prompts.json")),
+                              images_dir=str(pipeline.store.path("images")),
+                              ready_images=report["ready_images"], total_images=report["total_images"],
+                              report=str(pipeline.store.path("external_images.json")))
+            else:
+                result.update(video=str(pipeline.store.path("final.mp4")),
+                              report=str(pipeline.store.path("quality_report.json")))
+            print(json.dumps(result, indent=2))
             return 0
     except KeyboardInterrupt:
         print("Interrupted; resume the job to continue from completed checkpoints.", file=sys.stderr)

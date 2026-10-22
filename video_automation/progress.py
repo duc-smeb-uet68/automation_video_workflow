@@ -101,4 +101,5 @@ def read_progress(folder):
     path = folder / "progress.json"
     progress = read_json(path) if path.is_file() else {}
     return {**progress, "job_id": manifest["job_id"], "mode": manifest["mode"],
+            "image_mode": manifest.get("image_mode", "api"),
             "status": manifest["status"], "error": manifest.get("error"), "progress_available": bool(progress)}
