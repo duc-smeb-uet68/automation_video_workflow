@@ -222,6 +222,40 @@ def test_openrouter_incomplete_response_fails_clearly(store, monkeypatch):
         client.structured("script", "Fixture", SCRIPT_SCHEMA)
 
 
+@pytest.mark.parametrize("provider,key", [("openrouter", "OPENROUTER_API_KEY"), ("openai", "OPENAI_API_KEY")])
+def test_visual_token_limit_is_retryable_with_reason(store, monkeypatch, provider, key):
+    store.config.text_provider = provider
+    monkeypatch.setenv(key, "fixture-key")
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: {
+        "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"cues": [\n' + ' '*100}]}]})
+    with pytest.raises(TemporaryError, match=r"response is incomplete \(max_output_tokens\)"):
+        client.visuals([Cue(id="cue_0001", text="Scene.", start=0, end=1, word_start=0, word_end=1)])
+
+
+@pytest.mark.parametrize("status,reason", [("incomplete", "content_filter"), ("incomplete", None),
+                                           ("failed", "max_output_tokens"), ("incomplete", ["max_output_tokens"])])
+def test_other_incomplete_visual_responses_do_not_retry(store, monkeypatch, status, reason):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: {"status": status, "incomplete_details": {"reason": reason}, "output": []})
+    with pytest.raises(PipelineError) as error:
+        client.visuals([Cue(id="cue_0001", text="Scene.", start=0, end=1, word_start=0, word_end=1)])
+    assert not isinstance(error.value, TemporaryError)
+
+
+def test_incomplete_visual_refusal_remains_permanent(store, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: {
+        "status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+        "output": [{"type": "message", "content": [{"type": "refusal", "refusal": "Fixture refusal"}]}]})
+    with pytest.raises(PipelineError, match="refused") as error:
+        client.visuals([Cue(id="cue_0001", text="Scene.", start=0, end=1, word_start=0, word_end=1)])
+    assert not isinstance(error.value, TemporaryError)
+
+
 @pytest.mark.parametrize("provider,selected,unused", [
     ("openrouter", "OPENROUTER_API_KEY", "OPENAI_API_KEY"),
     ("openai", "OPENAI_API_KEY", "OPENROUTER_API_KEY"),

@@ -855,6 +855,56 @@ def test_invalid_visual_plan_exhausts_retries_without_completed_checkpoint(store
     assert provider.calls == ["visuals"] * store.config.max_attempts
 
 
+@pytest.mark.parametrize("exhaust", [False, True])
+def test_incomplete_visual_output_retries_without_repeating_completed_work(store, monkeypatch, exhaust):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    words = visual_words(store)
+    atomic_bytes(store.path("audio/narration.wav"), b"completed narration")
+    atomic_bytes(store.path("alignment.json"), b"completed alignment")
+    preserved = {path: file_hash(store.path(path)) for path in ("audio/narration.wav", "alignment.json")}
+    calls, recovered = [], [False]
+    def handler(request):
+        payload = json.loads(request.content)
+        ids = payload["text"]["format"]["schema"]["properties"]["cues"]["items"]["properties"]["id"]["enum"]
+        calls.append(ids[0])
+        if ids[0] == "cue_0025" and not recovered[0]:
+            if not exhaust:
+                recovered[0] = True
+            return httpx.Response(200, json={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"cues": [\n' + ' '*100}]}]})
+        plan = {"cues": [{"id": value, "scene_group": "camp", "character_ids": [],
+                         "scene_description": "A campfire.", "overlay_text": None, "motion": "hold"} for value in ids]}
+        return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
+            "content": [{"type": "output_text", "text": json.dumps(plan)}]}]})
+    original_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=transport, **kwargs))
+    if exhaust:
+        with pytest.raises(TemporaryError, match="max_output_tokens"):
+            Pipeline(store).visuals(words)
+        assert not store.path("visuals/batch_001.json").exists()
+        assert calls == ["cue_0001", "cue_0025", "cue_0025"]
+        resumed = Store(store.folder, store.config)
+        with pytest.raises(PipelineError, match="retry limit reached"):
+            Pipeline(resumed).visuals(words)
+        assert len(calls) == 3
+        recovered[0] = True
+        resumed.manifest.stages["visuals.001"].attempts = 0
+        resumed.save()
+        Pipeline(resumed).visuals(words)
+        assert calls == ["cue_0001", "cue_0025", "cue_0025", "cue_0025", "cue_0049"]
+    else:
+        Pipeline(store).visuals(words)
+        resumed = Store(store.folder, store.config)
+        assert calls == ["cue_0001", "cue_0025", "cue_0025", "cue_0049"]
+        assert resumed.manifest.stages["visuals.001"].attempts == 2
+    assert resumed.manifest.stages["visuals.000"].attempts == 1
+    assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
+    assert len(resumed.manifest.usage) == len(calls)
+    Pipeline(resumed).visuals(words)
+    assert len(resumed.manifest.usage) == len(calls)
+
+
 def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store):
     from video_automation.providers import STYLE, VISUAL_PROMPT
     words = visual_words(store)

@@ -250,12 +250,18 @@ class Providers:
         endpoint = "https://openrouter.ai/api/v1/responses" if openrouter else "https://api.openai.com/v1/responses"
         data = self.post(operation, endpoint,
                          {"Authorization": f"Bearer {self.key(self.config.text_key_env)}"}, payload)
-        if data.get("status") != "completed":
-            raise PipelineError(f"{operation}: {self.config.text_provider} response is {data.get('status', 'missing status')}")
         parts = [part for item in data.get("output", []) if item.get("type") == "message"
                  for part in item.get("content", [])]
         if any(part.get("type") == "refusal" for part in parts):
             raise PipelineError(f"{operation}: {self.config.text_provider} refused the request")
+        if data.get("status") != "completed":
+            details = data.get("incomplete_details")
+            token_limit = (operation == "visuals" and data.get("status") == "incomplete"
+                           and isinstance(details, dict) and details.get("reason") == "max_output_tokens")
+            message = f"{operation}: {self.config.text_provider} response is {data.get('status', 'missing status')}"
+            if token_limit:
+                raise TemporaryError(message + " (max_output_tokens); bounded retries apply")
+            raise PipelineError(message)
         output = "".join(part.get("text", "") for part in parts if part.get("type") == "output_text")
         try:
             result = json.loads(output)

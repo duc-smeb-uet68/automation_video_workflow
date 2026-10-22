@@ -2,6 +2,18 @@
 
 Latest offline verification on 2026-10-22. The user has attempted live research and completed live script-mode speech plus 63 cue images; full live video acceptance remains incomplete.
 
+## Incomplete visual response recovery
+
+Job `video_text_only_9fe16c323051` completed speech generation, decoding, and visual batch `visuals.000`. Batch `visuals.001` returned HTTP 200 with `status: "incomplete"`, `incomplete_details.reason: "max_output_tokens"`, and exactly 10,000 output tokens. Its output contained invalid JSON and extensive whitespace. The adapter previously treated every incomplete response as permanent, stopping after one attempt despite the remaining retry allowance.
+
+Visual responses stopped by the output token limit now raise `TemporaryError` with the explicit `max_output_tokens` reason and use the existing persisted retry budget and backoff. They are never approved as completed plans. Refusals remain permanent, including refusals inside incomplete responses. Other incomplete reasons and non-visual operations retain permanent failure handling. Request limits, prompts, batch sizes, and generation cache inputs are unchanged.
+
+Three regression cases failed before the fix. Focused visual/provider recovery checks pass **31 tests** in **2.02 seconds**, using `.venv/Scripts/python.exe -m pytest -q tests/test_openrouter.py tests/test_pipeline.py -k 'visual or incomplete_response' -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/visual-incomplete-focused`. Coverage includes both text providers, refusals, other incomplete reasons, automatic recovery, exhaustion across resume, explicit retry reset, usage records, and preservation of completed work.
+
+The complete offline suite passes **201 tests** in **64.21 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/visual-incomplete-full`. This includes real FFmpeg rendering and the existing Gemini fallback, provider, budget, timing, cache, and recovery checks.
+
+An offline replay in a disposable copy of the actual job reused both speech checkpoints and its first visual batch, replayed the saved incomplete response, and recovered all **75 cues** with mocked successful responses. Requested batch starts were `cue_0025` twice, then `cue_0049` and `cue_0073`. Both speech attempt counts and the first visual batch attempt count remained one. Hashes and modification times of all **15 original job files** remained unchanged. No live generation requests were made; the original job still needs to be resumed for live completion.
+
 ## OpenRouter image credit fallback and Gemini key pools
 
 OpenRouter remains the primary image provider. An image HTTP 402 credit failure switches the current invocation to direct Gemini, using `gemini_model` and the exact saved standalone prompts. Temporary OpenRouter in-flight budget errors retain bounded retries instead. Other OpenRouter failures do not trigger fallback, and text generation keeps its configured provider without fallback.
