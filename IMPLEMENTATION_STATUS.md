@@ -2,6 +2,16 @@
 
 Latest offline verification on 2026-10-22. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
 
+## Video title and description
+
+Script and topic workflows now generate `video_metadata.json` from the finalized narration in a separate metadata phase before speech. The configured text provider returns a nonblank single-line title of at most 100 characters and a nonblank description of at most 5,000 characters. The prompt requests the narration's language and a grounded summary without invented sources or promotional claims. The CLI reports the metadata path at the external-image handoff and after completion. Generated workflows have eight phases; fixture and imported workflows retain their three rendering phases.
+
+Metadata uses an independent checkpoint keyed by narration, text provider/model, prompt, and schema. Malformed generated or cached metadata is rejected before approval and receives bounded retries; provider refusals remain permanent failures. Existing compatible jobs without metadata generate only the missing metadata when other checkpoints remain valid. A configured spending ceiling requires a conservative `metadata` request cap, and reservations use the existing request ledger.
+
+The focused metadata checks pass **22 tests** in **6.09 seconds**. They cover metadata availability and cache reuse after speech quota failure, invalid fields, cached semantic validation, missing/corrupt artifact recovery, narration/model/prompt cache inputs, OpenRouter and OpenAI request contracts, budget reservations and preflight rejection, malformed response retries, permanent refusals, and the CLI handoff path. The complete offline suite passes **282 tests** in **122.76 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/metadata-full`. This includes both script/topic real FFmpeg pipelines, external-image rendering and replacements, existing recovery, timing, provider, and persistence checks.
+
+CLI help and `git diff --check` also pass. No live API requests were made, and no retained jobs, local configuration, or credentials were modified. Live metadata quality and full live video acceptance remain unverified. The sections below record earlier verification.
+
 ## External-image mode as the default
 
 New runs default to `image_mode: "external"`. Narration, speech, exact alignment, timed cues, frame boundaries, separate SRT subtitles, and standalone image prompts are prepared before the image handoff. The CLI creates no placeholder images and returns exit 0 with `status: "waiting_for_images"` when expected files are missing or invalid. `external_images.json` lists expected cue filenames, ready counts, missing paths, and invalid-file details; progress retains the active image phase without marking rendering or validation completed.

@@ -61,6 +61,10 @@ class FakeProviders:
         return {"sentences": [{"sentence_id": s.id, "supported": True, "kind": "reconstruction",
                                "source_urls": [], "reason": "Explicit reconstruction fixture"} for s in script.sentences]}
 
+    def metadata(self, narration):
+        self.calls.append("metadata")
+        return {"title": "Caregivers Beside the Fire", "description": "Imagine a parent and another caregiver watching a child."}
+
     def speech(self, text):
         self.calls.append("speech")
         self.spoken = text
@@ -479,9 +483,10 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, monkeypat
     assert report["mode"] == mode
     progress = read_json(store.path("progress.json"))
     assert progress["status"] == "completed"
-    assert progress["completed_phases"] == progress["total_phases"] == 7
+    assert progress["completed_phases"] == progress["total_phases"] == 8
     assert list(dict.fromkeys(snapshot["phase"] for snapshot in snapshots)) == [
-        "narration", "speech", "visuals", "images", "render", "finish", "validate"]
+        "narration", "metadata", "speech", "visuals", "images", "render", "finish", "validate"]
+    assert read_json(store.path("video_metadata.json"))["title"] == "Caregivers Beside the Fire"
     for phase, total in (("visuals", (len(store.manifest.cues)+23)//24),
                          ("images", len(store.manifest.cues)), ("render", len(store.manifest.cues))):
         completed = [snapshot for snapshot in snapshots if snapshot["phase"] == phase and snapshot["phase_status"] == "completed"][-1]

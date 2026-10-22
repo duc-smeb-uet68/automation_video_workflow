@@ -181,6 +181,8 @@ def main(argv=None):
             result = {"status": pipeline.store.manifest.status, "mode": pipeline.store.manifest.mode,
                       "job_id": pipeline.store.manifest.job_id, "image_mode": pipeline.store.manifest.image_mode,
                       "subtitles": str(pipeline.store.path("subtitles.en.srt"))}
+            if pipeline.store.manifest.mode in {"production", "script"}:
+                result["metadata"] = str(pipeline.store.path("video_metadata.json"))
             if pipeline.store.manifest.status == "waiting_for_images":
                 result.update(prompts=str(pipeline.store.path("image_prompts.json")),
                               images_dir=str(pipeline.store.path("images")),

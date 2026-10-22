@@ -123,6 +123,17 @@ class Script(Record):
     source_references: list[str] = Field(default_factory=list)
 
 
+class VideoMetadata(Record):
+    title: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=5000)
+
+    @model_validator(mode="after")
+    def meaningful_text(self):
+        if not self.title.strip() or not self.description.strip() or "\n" in self.title or "\r" in self.title:
+            raise ValueError("Video metadata requires a nonblank single-line title and a nonblank description")
+        return self
+
+
 class Word(Record):
     text: str
     start: float = Field(ge=0)

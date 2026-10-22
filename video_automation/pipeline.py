@@ -12,7 +12,8 @@ from PIL import Image
 from . import media
 from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
-from .providers import AUDIT_PROMPT, RESEARCH_PROMPT, SCRIPT_PROMPT, STYLE, VISUAL_PROMPT, Providers, validate_visual_plan
+from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
+                        STYLE, VISUAL_PROMPT, Providers, validate_metadata, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import aligned_words, make_script, normalize, segment_words, subtitles
 
@@ -127,6 +128,13 @@ class Pipeline:
         store.manifest.script_character_count = script.character_count
         store.save()
         return script
+
+    def metadata(self, script: Script) -> dict:
+        return self.json_task("metadata", {"narration": script.narration,
+                              "text_generation": self.config.text_cache_settings,
+                              "prompt": METADATA_PROMPT, "schema": METADATA_SCHEMA},
+                              "video_metadata.json", lambda: self.providers.metadata(script.narration),
+                              validate=validate_metadata)
 
     def speech(self, script: Script):
         store, manifest = self.store, self.store.manifest
@@ -285,13 +293,15 @@ class Pipeline:
         store, manifest = self.store, self.store.manifest
         manifest.status, manifest.error = "running", None
         store.save()
-        phases = (["narration", "speech", "visuals", "images"] if manifest.mode in {"production", "script"} else [])
+        phases = (["narration", "metadata", "speech", "visuals", "images"] if manifest.mode in {"production", "script"} else [])
         progress = WorkflowProgress(store, phases + ["render", "finish", "validate"])
         store.progress = progress
         try:
             if manifest.mode in {"production", "script"}:
                 with progress.phase("narration"):
                     script = self.script()
+                with progress.phase("metadata"):
+                    self.metadata(script)
                 with progress.phase("speech"):
                     words = self.speech(script)
                 with progress.phase("visuals"):
