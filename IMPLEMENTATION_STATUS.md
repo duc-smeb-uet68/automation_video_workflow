@@ -1,6 +1,16 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-10-22. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+Latest offline verification on 2026-10-23. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+
+## Narration without a character-range requirement
+
+The 4,500–5,000-character narration requirement is removed from input parsing, topic drafting, the speech boundary, and final validation. Both input modes accept nonempty normalized narration without a project-level minimum or maximum character count. Topic drafting has no fixed character target or automatic length revision. Empty text, changed input snapshots, unnormalized speech input, incorrect recorded character counts, and mismatched speech alignment still fail. The selected speech model's existing request limit still applies; narration is not truncated or split into separate speech requests.
+
+Final validation retains the historical `narration_length` report key for compatibility. It now checks nonempty narration and, for generated speech, normalization and recorded-count integrity. Its details report `enforced: false` and identify whether generated-text integrity was checked. Manifest schema and metadata title/description limits are unchanged.
+
+The focused provider/pipeline checks pass **185 tests** in **58.54 seconds**. The complete offline suite passes **298 tests** in **97.51 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/script-length-full`. Coverage includes input acceptance from 1 to 50,001 Unicode characters, empty/whitespace rejection before job creation, short and long topic drafts without length revisions, cached topic reuse, speech normalization, unchanged per-model request limits, and real FFmpeg exports and validation for both short and long scripts in both generated modes. Existing source-audit, metadata, timing, retry, external-image, persistence, renderer, and recovery checks also pass.
+
+The updated `import-assets --help` and `git diff --check` pass. No live API requests were made, and no retained jobs, local configuration, or credentials were modified. The sections below record earlier verification and may describe the former narration-length requirement.
 
 ## Video title and description
 

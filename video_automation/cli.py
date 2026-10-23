@@ -97,7 +97,7 @@ def main(argv=None):
     importer.add_argument("--audio", type=Path, required=True)
     importer.add_argument("--subtitles", type=Path, required=True)
     importer.add_argument("--job-id", required=True)
-    importer.add_argument("--limit-cues", type=int, help="Short renderer fixture only; skips production length acceptance")
+    importer.add_argument("--limit-cues", type=int, help="Import only the first N cues as a renderer fixture")
     editor = commands.add_parser("export-kdenlive", help="Export an optional editable project using the existing workspace template")
     editor.add_argument("job")
     editor.add_argument("--template", type=Path, required=True)

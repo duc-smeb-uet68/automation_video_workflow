@@ -93,10 +93,6 @@ class Pipeline:
         draft = self.json_task("script.draft", {"research": research, "topic": manifest.topic,
                               "text_generation": self.config.text_cache_settings, "prompt": SCRIPT_PROMPT},
                               "draft.json", lambda: self.providers.script(manifest.topic, research))
-        if not 4500 <= len(normalize(draft["narration"])) <= 5000:
-            draft = self.json_task("script.revision", {"draft": draft, "research": research, "prompt": SCRIPT_PROMPT,
-                                  "topic": manifest.topic, "text_generation": self.config.text_cache_settings},
-                                  "draft_revision.json", lambda: self.providers.script(manifest.topic, research, draft))
         script = make_script(draft["narration"], draft["source_references"])
         allowed = {s["url"] for s in research["sources"]}
         if not script.source_references or not set(script.source_references) <= allowed:
@@ -139,8 +135,8 @@ class Pipeline:
     def speech(self, script: Script):
         store, manifest = self.store, self.store.manifest
         # Repeat the invariant at the provider boundary, including resumed jobs.
-        if script.narration != normalize(script.narration) or not 4500 <= len(script.narration) <= 5000:
-            raise PipelineError("Speech blocked: normalized script must contain 4500–5000 characters")
+        if not script.narration or script.narration != normalize(script.narration):
+            raise PipelineError("Speech blocked: narration must be nonempty and normalized")
         speech = self.json_task("speech.request", {"text": script.narration, "model": self.config.elevenlabs_model,
                                 "voice": self.config.voice_id, "settings": self.config.voice_settings},
                                 "audio/speech_response.json", lambda: self.providers.speech(script.narration))

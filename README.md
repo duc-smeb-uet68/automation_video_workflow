@@ -21,7 +21,7 @@ python -m video_automation doctor
 python -m video_automation run .\narration.txt
 ```
 
-The narration file is the initial per-video content input. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The configured speech models accept the complete 4,500–5,000-character script in one request.
+The narration file is the initial per-video content input. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The project accepts any nonempty normalized script without a minimum or maximum character count. Speech generation still uses one timestamped request and checks the selected speech model's input limit before sending it.
 
 ## External images and API images
 
@@ -66,7 +66,7 @@ python -m video_automation run .\narration.txt
 python -m video_automation run --script .\narration.txt
 ```
 
-Script mode skips research, drafting, length revision, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. It must contain 4,500–5,000 Python Unicode characters after normalization; invalid files stop before generation requests. The normalized text is sent unchanged to ElevenLabs. Exact character alignment, timed transcripts, visual planning, sequential image generation, rendering, and validation still run. The text provider is still required for visual planning.
+Script mode skips research, drafting, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. Empty normalized files stop before generation requests. There is no project-level narration-length requirement or automatic length revision in either input mode. The normalized text is sent unchanged to ElevenLabs, subject to the selected speech model's request limit. Exact character alignment, timed transcripts, visual planning, image preparation, rendering, and validation still run. The text provider is still required for metadata and visual planning.
 
 Each script job stores an `input_script.txt` snapshot and its hash. `resume JOB_ID` reads that snapshot, so moving, editing, or deleting the original file does not change an existing job. Running a changed script creates a different default job. Reusing an explicit `--job-id` with different content or a different mode is rejected. If the saved snapshot is missing or corrupt, rerun with the original narration file and the same job ID to restore it. Input-file paths resolve against the working directory.
 
@@ -151,7 +151,7 @@ This workflow applies only to new jobs. Older manifests and incompatible generat
 | `manifest.json` | Job state, image strategy, cues, timing, attempts, input hashes, artifact hashes, errors, usage |
 | `input_script.txt` | Normalized input snapshot for supplied-script jobs; retained for resume |
 | `sources.json` | Retrieved source URLs and supported claims; topic mode only |
-| `draft.json`, optional `draft_revision.json` | Original script draft and the single permitted length revision; topic mode only |
+| `draft.json` | Generated narration draft; topic mode only |
 | `script.txt`, `script.json` | Exact normalized narration and stable paragraph/sentence IDs |
 | `source_audit.json` | Separate model audit of every sentence's source support; topic mode only |
 | `video_metadata.json` | Generated title and description based on the finalized narration; script and topic modes |
@@ -174,7 +174,7 @@ HTTP failures save selected, redacted provider error fields and any available re
 
 ## Workflow progress
 
-`run`, `resume`, `fixture`, and `import-assets` show live progress on stderr. Stdout retains the final JSON result. Generated jobs have eight phases: narration preparation, metadata generation, speech, visual planning, image generation or external-image adoption, clip rendering, audio finishing, and validation. Fixture and imported jobs have the final three phases. Research, drafting, optional revision, and source auditing appear as tasks within narration preparation.
+`run`, `resume`, `fixture`, and `import-assets` show live progress on stderr. Stdout retains the final JSON result. Generated jobs have eight phases: narration preparation, metadata generation, speech, visual planning, image generation or external-image adoption, clip rendering, audio finishing, and validation. Fixture and imported jobs have the final three phases. Research, drafting, and source auditing appear as tasks within narration preparation.
 
 Progress shows the active task, attempt limit, cached tasks, and completed batches, images, or clips when their totals are known. Cue-derived totals remain dynamic. Counts describe completed work rather than estimated time remaining; phases have different costs and durations. Clip counts do not mark rendering complete until rough-cut assembly also finishes. Completion is reported only after validation passes.
 
@@ -202,7 +202,7 @@ Temporary HTTP failures, transport errors, missing image responses, and invalid 
 
 Visual batches must contain every requested cue ID exactly once in order, with valid scene descriptions, character IDs, and motion settings. The requested output schema constrains the cue count and allowed IDs for each batch. Malformed visual output is rejected before a checkpoint is marked completed and receives the existing bounded retries. Visual responses with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"` also receive those retries, and the error reports the token-limit reason. Partial output is never approved. Refusals and other incomplete-response reasons still stop immediately. Cached batches from older runs are revalidated before reuse. Invalid cached batches are retried within their remaining attempt budget, while valid earlier batches and completed speech remain cached. Later batches are regenerated when their continuity inputs change. Raw provider responses remain available for diagnosis.
 
-The character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken. Topic mode allows exactly one automatic length revision; a second failure stops before speech or image generation. Script mode rejects out-of-range input without rewriting it. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Timing is frozen after audio decoding; later speech changes require regeneration and alignment.
+The recorded character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken. Narration must be nonempty; no character-range gate or automatic length revision applies. Final validation retains the historical `narration_length` report key to check nonempty text, normalization, and the recorded character count, with `enforced: false` indicating that length bounds are disabled. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Timing is frozen after audio decoding; later speech changes require regeneration and alignment.
 
 Visual cues follow aligned words and sentence boundaries. Their count is dynamic. Frame durations derive from adjacent absolute boundaries. Boundaries that collapse onto one frame are merged without dropping text. The first visual starts at frame zero; the last image holds until the final recording ends. Output may pad the final audio by less than one frame to match the encoded video.
 
@@ -216,7 +216,7 @@ Audio finishing uses two-pass loudness normalization. Optional local music loops
 
 Every attempted provider request records status, available provider usage, response location, and request ID. No price is invented for unknown usage. By default `spending_ceiling_usd` is `null`; provider billing limits should be configured on the provider accounts.
 
-An optional local budget uses conservative, operator-supplied **maximum request costs**, keyed by operation: `research`, `script`, `script_revision`, `source_audit`, `metadata`, `speech`, `visuals`, and `image`. If a ceiling is set, every requested operation must have a cap. Before each request, the pipeline reserves that cap and refuses requests that would exceed the job ceiling. Each OpenRouter attempt, Gemini fallback request, and Gemini key change reserves a separate `image` cap; configure that cap to cover both image providers. Reservations remain charged against the local allowance even after timeouts or failed responses. This bounds the local ledger only to the extent that the supplied caps truly cover provider charges. It is not a provider-enforced billing limit. Model and tool prices must be checked when configuring those caps.
+An optional local budget uses conservative, operator-supplied **maximum request costs**, keyed by operation: `research`, `script`, `source_audit`, `metadata`, `speech`, `visuals`, and `image`. If a ceiling is set, every requested operation must have a cap. Before each request, the pipeline reserves that cap and refuses requests that would exceed the job ceiling. Each OpenRouter attempt, Gemini fallback request, and Gemini key change reserves a separate `image` cap; configure that cap to cover both image providers. Reservations remain charged against the local allowance even after timeouts or failed responses. This bounds the local ledger only to the extent that the supplied caps truly cover provider charges. It is not a provider-enforced billing limit. Model and tool prices must be checked when configuring those caps.
 
 ## Renderer fixtures and existing assets
 
@@ -254,7 +254,7 @@ This writes `project.kdenlive` from the job manifest using the existing workspac
 python -m pytest -q
 ```
 
-If a restricted Windows environment cannot create its default temporary directory, create `.test-tmp` in the workspace and use an absolute `--basetemp` path under it. Tests use offline provider contracts for narration gates, audits, exact speech text, word coverage, optional native text, job isolation, caching, retries, budget checks, and interrupted-image recovery. Real FFmpeg integration covers music ducking, preservation of source-image text, encoding, validation, and cached reruns. Offline provider tests do not prove live account access or generated content quality.
+If a restricted Windows environment cannot create its default temporary directory, create `.test-tmp` in the workspace and use an absolute `--basetemp` path under it. Tests use offline provider contracts for nonempty normalized narration, audits, exact speech text, word coverage, optional native text, job isolation, caching, retries, budget checks, and interrupted-image recovery. Real FFmpeg integration covers short and long narration, music ducking, preservation of source-image text, encoding, validation, and cached reruns. Offline provider tests do not prove live account access or generated content quality.
 
 The final acceptance step remains an unattended **live** topic-to-video run with configured provider credentials and voice ID. See `IMPLEMENTATION_STATUS.md` for the evidence collected in this workspace.
 

@@ -12,10 +12,10 @@ def normalize(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
-def make_script(text: str, references=(), enforce_length=True) -> Script:
+def make_script(text: str, references=()) -> Script:
     text = normalize(text)
-    if enforce_length and not 4500 <= len(text) <= 5000:
-        raise PipelineError(f"Narration has {len(text)} characters; required 4500–5000 before speech generation")
+    if not text:
+        raise PipelineError("Narration cannot be empty")
     sentences = []
     for paragraph_index, paragraph in enumerate(re.finditer(r"[^\n]+(?:\n(?!\n)[^\n]+)*", text), 1):
         for match in re.finditer(r'.+?(?:[.!?]["\u201d\u2019\']*(?=\s|$)|$)', paragraph.group(), re.DOTALL):

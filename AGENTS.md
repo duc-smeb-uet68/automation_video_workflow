@@ -70,7 +70,7 @@ The CLI automatically loads `config.local.json` from the working directory. Put 
 The default `input_mode` is `script`: `run narration.txt` or `run --script narration.txt` supplies final UTF-8 narration and skips research, drafting, revision, and source auditing. Snapshot the normalized input in `input_script.txt` with its hash so resume does not depend on the external file. `run --mode topic TOPIC` keeps the original workflow, recorded as `production` in manifests. Existing jobs retain their saved mode when resumed.
 
 1. In topic mode, research the topic with bounded searches and retrieved source URLs. Generate a structured narration draft. In script mode, read the supplied narration instead.
-2. Normalize CRLF/CR to LF and trim outer whitespace. Require exactly 4,500–5,000 Python Unicode characters in both modes, including internal spaces and punctuation. Topic mode permits only one automatic length revision; script mode never rewrites supplied text.
+2. Normalize CRLF/CR to LF and trim outer whitespace. Reject empty normalized narration in both modes. Record Python Unicode character counts for integrity checks without enforcing minimum or maximum narration length or automatically revising its length. Script mode never rewrites supplied text. The selected speech model's request limit still applies at the provider boundary.
 3. In topic mode, audit every sentence against research. Reject unsupported claims, missing coverage, and references outside retrieved sources before paid speech or image generation. Script mode skips this audit explicitly.
 4. Generate a title and description from the finalized narration with the configured text provider. Validate and checkpoint `video_metadata.json` independently without changing narration or downstream cache inputs. Titles are nonblank single lines of at most 100 characters; descriptions are nonblank and at most 5,000 characters. Metadata runs before speech in both generated modes and requires a `metadata` request cap when a spending ceiling is configured. Fixture/imported jobs skip it.
 5. Send the exact normalized narration to ElevenLabs. Decode audio to WAV and derive word/sentence timing from original character alignment. Reject text mismatches instead of inventing timestamps.
@@ -83,7 +83,7 @@ Preserve these additional constraints:
 - Audio determines duration. Never hardcode cue counts, video length, image counts, or values from the existing imported video.
 - Derive clip lengths from adjacent absolute frame boundaries. Start at frame zero and hold the final image through the recording. Merge collapsed boundaries without losing text.
 - Support only `hold` and the centered 1.5% `slow_push` motion unless the task explicitly changes that scope.
-- Keep production, script, fixture, and imported modes distinct. Script mode still requires exact fresh speech alignment and the narration-length gate. Fixture/imported rendering does not prove live topic-to-video acceptance or fresh speech alignment.
+- Keep production, script, fixture, and imported modes distinct. Script mode still requires nonempty normalized narration, recorded-count integrity, and exact fresh speech alignment. Fixture/imported rendering does not prove live topic-to-video acceptance or fresh speech alignment.
 - Keep generation independent of browser interfaces. Retain the single-worker architecture unless the task explicitly requires a change.
 
 ## Jobs, recovery, and costs

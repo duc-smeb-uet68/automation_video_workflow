@@ -60,6 +60,46 @@ def test_selected_endpoint_key_and_strict_schema(store, monkeypatch, provider, k
     assert result["narration"] == "Fixture."
 
 
+def test_script_prompt_has_no_character_target_or_revision(store, monkeypatch):
+    client = Providers(store)
+    requests = []
+
+    def structured(operation, prompt, schema):
+        requests.append((operation, prompt, schema))
+        return {"narration": "You hear a cry.", "source_references": []}, {}
+
+    monkeypatch.setattr(client, "structured", structured)
+    assert client.script("Caregivers", {"sources": []})["narration"] == "You hear a cry."
+    operation, prompt, schema = requests[0]
+    assert operation == "script" and schema == SCRIPT_SCHEMA
+    assert all(target not in prompt for target in ("4500", "4,500", "4750", "5000", "5,000"))
+    assert "Do not pad or truncate narration to meet a length target" in prompt
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("model,limit", [
+    ("eleven_multilingual_v2", 10000), ("eleven_flash_v2_5", 40000),
+    ("eleven_v3", 5000), ("eleven_v4", 10000),
+])
+def test_speech_provider_keeps_its_model_request_limit(store, monkeypatch, model, limit):
+    store.config.elevenlabs_model = model
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "fixture-key")
+    client = Providers(store)
+    requests = []
+
+    def post(operation, url, headers, payload, params=None):
+        requests.append(payload)
+        return {"fixture": True}
+
+    monkeypatch.setattr(client, "post", post)
+    text = "é" * limit
+    assert client.speech(text) == {"fixture": True}
+    assert requests[0]["text"] == text
+    with pytest.raises(PipelineError, match=f"input limit of {limit}"):
+        client.speech(text + ".")
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_openrouter_research_search_limits_and_citation_provenance(store, monkeypatch, nested):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")

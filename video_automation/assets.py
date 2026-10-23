@@ -88,7 +88,7 @@ def import_assets(config, manifest_path, audio_path, subtitles_path, job_id, lim
                                      image_path=relative, scene_group="legacy", scene_description=clip.get("prompt", ""),
                                      motion="slow_push" if "slow" in decisions.get(clip["filename"], "") else "hold"))
         word_cursor += word_count
-    script = make_script("\n\n".join(c.text for c in store.manifest.cues), enforce_length=False)
+    script = make_script("\n\n".join(c.text for c in store.manifest.cues))
     atomic_bytes(store.path("script.txt"), script.narration.encode("utf-8"))
     write_json(store.path("script.json"), script.model_dump())
     write_json(store.path("import_provenance.json"), {"manifest": str(manifest_path.resolve()), "audio": str(audio_path.resolve()),
@@ -125,7 +125,7 @@ def fixture(config, job_id="renderer_fixture"):
                   word_start=index*5, word_end=(index+1)*5, image_path=relative,
                   motion="slow_push" if index == 1 else "hold")
         store.manifest.cues.append(cue)
-    script = make_script("\n\n".join(texts), enforce_length=False)
+    script = make_script("\n\n".join(texts))
     atomic_bytes(store.path("script.txt"), script.narration.encode("utf-8"))
     write_json(store.path("script.json"), script.model_dump())
     store.manifest.script_character_count = script.character_count

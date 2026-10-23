@@ -52,8 +52,8 @@ class FakeProviders:
         self.calls.append("research")
         return {"sources": [{"url": "https://example.org/study", "title": "Fixture", "supported_claims": ["Fixture"]}]}
 
-    def script(self, topic, research, previous=None):
-        self.calls.append("revision" if previous else "script")
+    def script(self, topic, research):
+        self.calls.append("script")
         return {"narration": self.text, "source_references": ["https://example.org/study"]}
 
     def audit(self, script, research):
@@ -89,50 +89,47 @@ class FakeProviders:
         return image_bytes()
 
 
-def test_normalized_unicode_count_and_boundaries():
+def test_normalized_unicode_count_without_length_bounds():
     assert normalize(" \r\nA\rB\r\n ") == "A\nB"
-    for length in (4500, 5000):
+    for length in (1, 4499, 4500, 5000, 5001, 50001):
         text = "é" * (length-1) + "."
         assert make_script(text).character_count == length
-    for length in (4499, 5001):
-        with pytest.raises(PipelineError, match="before speech generation"):
-            make_script("x" * length)
-    script = make_script("You hear a cry.\n\nYou imagine a camp!", enforce_length=False)
+    script = make_script("You hear a cry.\n\nYou imagine a camp!")
     assert [s.id for s in script.sentences] == ["sentence_0001", "sentence_0002"]
     assert [s.paragraph_id for s in script.sentences] == ["paragraph_001", "paragraph_002"]
     assert all(script.narration[s.char_start:s.char_end] == s.text for s in script.sentences)
 
 
-def test_length_revision_once_blocks_paid_downstream(store):
-    provider = FakeProviders("Too short.")
+@pytest.mark.parametrize("text", ["", " \r\n\t "])
+def test_empty_topic_narration_blocks_paid_downstream(store, text):
+    provider = FakeProviders()
+    provider.text = text
     pipeline = Pipeline(store, provider)
-    with pytest.raises(PipelineError, match="required 4500"):
+    with pytest.raises(PipelineError, match="Narration cannot be empty"):
         pipeline.run()
-    assert provider.calls == ["research", "script", "revision"]
+    assert provider.calls == ["research", "script"]
     assert store.manifest.status == "failed"
     assert store.path("failure_report.json").is_file()
-    # Restart does not buy fresh drafts or a third revision.
-    with pytest.raises(PipelineError, match="required 4500"):
+    # Restart does not repeat completed research or rewrite the empty draft.
+    with pytest.raises(PipelineError, match="Narration cannot be empty"):
         Pipeline(Store(store.folder, store.config), provider).run()
-    assert provider.calls == ["research", "script", "revision"]
+    assert provider.calls == ["research", "script"]
 
 
-def test_single_length_revision_can_succeed(store):
-    provider = FakeProviders()
-    original = provider.script
-    def repair(topic, research, previous=None):
-        if previous is None:
-            provider.calls.append("script")
-            return {"narration": "Too short.", "source_references": ["https://example.org/study"]}
-        return original(topic, research, previous)
-    provider.script = repair
-    script = Pipeline(store, provider).script()
-    assert script.character_count == len(narration())
-    assert provider.calls.count("revision") == 1
+@pytest.mark.parametrize("text", ["You hear a cry.", "You imagine " + "é" * 6000 + "."], ids=["short", "long"])
+def test_topic_narration_has_no_length_revision_and_reuses_cache(store, text):
+    provider = FakeProviders(text)
+    pipeline = Pipeline(store, provider)
+    script = pipeline.script()
+    assert script.narration == text and script.character_count == len(text)
+    assert provider.calls == ["research", "script", "audit"]
+    assert Pipeline(Store(store.folder, store.config), provider).script() == script
+    assert provider.calls == ["research", "script", "audit"]
+    assert "script.revision" not in store.manifest.stages
 
 
 def test_alignment_requires_same_text_and_valid_timestamps():
-    script = make_script("You hear.", enforce_length=False)
+    script = make_script("You hear.")
     alignment = {"characters": list(script.narration), "character_start_times_seconds": [i/10 for i in range(9)],
                  "character_end_times_seconds": [(i+1)/10 for i in range(9)]}
     words = aligned_words(script, alignment, 1)
@@ -144,6 +141,15 @@ def test_alignment_requires_same_text_and_valid_timestamps():
     alignment["character_end_times_seconds"][0] = float("nan")
     with pytest.raises(PipelineError, match="invalid or unordered"):
         aligned_words(script, alignment, 1)
+
+
+@pytest.mark.parametrize("text", ["", " You hear. ", "You\r\nhear."])
+def test_speech_still_blocks_empty_or_unnormalized_narration(store, text):
+    script = make_script("You hear.").model_copy(update={"narration": text})
+    provider = FakeProviders()
+    with pytest.raises(PipelineError, match="narration must be nonempty and normalized"):
+        Pipeline(store, provider).speech(script)
+    assert provider.calls == []
 
 
 def test_cue_coverage_rounding_and_final_hold():
@@ -448,7 +454,7 @@ def test_production_orchestration_and_resume_with_offline_contracts(store, monke
     pipeline.run()
     assert provider.spoken == normalize(provider.text)
     assert store.path("script.txt").read_text(encoding="utf-8") == provider.spoken
-    assert 4500 <= store.manifest.script_character_count <= 5000
+    assert store.manifest.script_character_count == len(provider.spoken)
     before = list(provider.calls)
     Pipeline(Store(store.folder, store.config), provider).run()
     assert provider.calls == before
@@ -457,7 +463,9 @@ def test_production_orchestration_and_resume_with_offline_contracts(store, monke
 
 
 @pytest.mark.parametrize("mode", ["production", "script"])
-def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, monkeypatch):
+@pytest.mark.parametrize("text", ["You hear a cry.\n\nYou imagine a camp!", "You imagine " + "é" * 6000 + "."],
+                         ids=["short", "long"])
+def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, text, monkeypatch):
     import video_automation.progress as tracking
     snapshots = []
     original_write = tracking.write_json
@@ -467,15 +475,17 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, monkeypat
         original_write(path, content)
 
     monkeypatch.setattr(tracking, "write_json", capture)
-    provider = FakeProviders()
+    provider = FakeProviders(text)
     if mode == "script":
         path = tmp_path / "narration.txt"
-        path.write_text(narration(), encoding="utf-8")
+        path.write_text(text, encoding="utf-8")
         store = Pipeline.create(store.config, script_path=path).store
     pipeline = Pipeline(store, provider)
     report = pipeline.run()
-    assert report["passed"] and report["details"]["narration_length"]["enforced"]
-    assert 4500 <= store.manifest.script_character_count <= 5000
+    assert report["passed"] and not report["details"]["narration_length"]["enforced"]
+    assert report["details"]["narration_length"]["integrity_checked"]
+    assert store.manifest.script_character_count == len(text)
+    assert provider.spoken == text
     assert len(store.manifest.cues) == len(list(store.path("images").glob("cue_*.png")))
     assert store.path("final.mp4").is_file()
     assert store.path("subtitles.en.srt").is_file()
@@ -496,11 +506,11 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, monkeypat
         assert not {"research", "script", "revision", "audit"} & set(provider.calls)
         assert not store.path("sources.json").exists()
         assert not store.path("source_audit.json").exists()
-        # Script mode still requires fresh speech alignment and the production length gate.
+        # Script mode still requires fresh speech alignment and unchanged narration.
         store.path("alignment.json").unlink()
         with pytest.raises(PipelineError, match="alignment_audio_match"):
             media.validate(store)
-        atomic_bytes(store.path("script.txt"), b"Too short.")
+        atomic_bytes(store.path("script.txt"), b"Changed narration.")
         with pytest.raises(PipelineError, match="narration_length"):
             media.validate(store)
 
@@ -728,17 +738,17 @@ def test_corrupt_script_snapshot_blocks_generation_and_can_be_restored(config, t
     assert restored.script().narration == narration()
 
 
-@pytest.mark.parametrize("length", [0, 4499, 5001])
-def test_invalid_input_script_stops_before_job_creation(config, tmp_path, length):
+@pytest.mark.parametrize("text", ["", " \r\n\t "])
+def test_empty_input_script_stops_before_job_creation(config, tmp_path, text):
     source = tmp_path / "invalid.txt"
-    source.write_text("x" * length, encoding="utf-8")
-    with pytest.raises(PipelineError, match="required 4500"):
+    source.write_text(text, encoding="utf-8")
+    with pytest.raises(PipelineError, match="Narration cannot be empty"):
         Pipeline.create(config, script_path=source)
     assert not config.jobs_dir.exists()
 
 
-@pytest.mark.parametrize("length", [4500, 5000])
-def test_input_script_accepts_exact_length_boundaries(config, tmp_path, length):
+@pytest.mark.parametrize("length", [1, 4499, 4500, 5000, 5001, 10001, 50001])
+def test_input_script_accepts_nonempty_text_without_length_bounds(config, tmp_path, length):
     source = tmp_path / "boundary.txt"
     source.write_text("é" * (length - 1) + ".", encoding="utf-8")
     pipeline = Pipeline.create(config, script_path=source)
@@ -803,10 +813,10 @@ def test_existing_manifest_resumes_topic_workflow_despite_script_default(store, 
     restored = Store(store.folder, store.config)
     assert restored.config.input_mode == "script"
     assert restored.manifest.mode == "production"
-    provider = FakeProviders("Too short.")
-    with pytest.raises(PipelineError, match="required 4500"):
-        Pipeline(restored, provider).run()
-    assert provider.calls == ["research", "script", "revision"]
+    provider = FakeProviders("You hear a cry.")
+    script = Pipeline(restored, provider).script()
+    assert script.narration == "You hear a cry."
+    assert provider.calls == ["research", "script", "audit"]
 
 
 def visual_words(store, count=200):
