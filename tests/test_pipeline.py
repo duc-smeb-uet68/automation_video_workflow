@@ -65,6 +65,10 @@ class FakeProviders:
         self.calls.append("metadata")
         return {"title": "Caregivers Beside the Fire", "description": "Imagine a parent and another caregiver watching a child."}
 
+    def thumbnail(self, narration, title):
+        self.calls.append("thumbnail")
+        return {"headline": "Who watches the child?", "prompt": "An illustrative caregiver holding a child beside a fire."}
+
     def speech(self, text):
         self.calls.append("speech")
         self.spoken = text
@@ -493,9 +497,11 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, text, mon
     assert report["mode"] == mode
     progress = read_json(store.path("progress.json"))
     assert progress["status"] == "completed"
-    assert progress["completed_phases"] == progress["total_phases"] == 8
-    assert list(dict.fromkeys(snapshot["phase"] for snapshot in snapshots)) == [
-        "narration", "metadata", "speech", "visuals", "images", "render", "finish", "validate"]
+    phases = ["narration", "metadata", "speech", "visuals", "images", "render", "finish", "validate"]
+    if store.manifest.thumbnail_enabled:
+        phases.insert(2, "thumbnail")
+    assert progress["completed_phases"] == progress["total_phases"] == len(phases)
+    assert list(dict.fromkeys(snapshot["phase"] for snapshot in snapshots)) == phases
     assert read_json(store.path("video_metadata.json"))["title"] == "Caregivers Beside the Fire"
     for phase, total in (("visuals", (len(store.manifest.cues)+23)//24),
                          ("images", len(store.manifest.cues)), ("render", len(store.manifest.cues))):

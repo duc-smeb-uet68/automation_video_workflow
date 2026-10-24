@@ -16,7 +16,7 @@ def pipeline(tmp_path):
         "width": 640, "height": 360, "max_attempts": 2, "retry_backoff_seconds": 0, "image_interval_seconds": 0})
     source = tmp_path / "narration.txt"
     source.write_bytes(("\ufeff \r\n" + narration() + "\r\n ").encode("utf-8"))
-    result = Pipeline.create(config, script_path=source)
+    result = Pipeline.create(config, script_path=source, thumbnail_enabled=False)
     result.providers = FakeProviders()
     return result
 

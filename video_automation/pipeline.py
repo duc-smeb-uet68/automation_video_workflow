@@ -13,7 +13,8 @@ from . import media
 from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
 from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
-                        STYLE, VISUAL_PROMPT, Providers, validate_metadata, validate_visual_plan)
+                        STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_PROMPT,
+                        Providers, thumbnail_prompt, validate_metadata, validate_thumbnail, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import aligned_words, make_script, normalize, segment_words, subtitles
 
@@ -32,7 +33,8 @@ class Pipeline:
         self.providers = providers or Providers(store)
 
     @classmethod
-    def create(cls, config, topic: str | None = None, job_id: str | None = None, *, script_path: Path | None = None):
+    def create(cls, config, topic: str | None = None, job_id: str | None = None, *,
+               script_path: Path | None = None, thumbnail_enabled: bool | None = None):
         script = make_script(script_path.read_text(encoding="utf-8-sig")) if script_path is not None else None
         mode = "script" if script is not None else "production"
         script_input_hash = digest(script.narration) if script is not None else None
@@ -54,9 +56,13 @@ class Pipeline:
                     or (script is not None and store.manifest.script_input_hash != script_input_hash)):
                 raise PipelineError("Existing job has a different topic, script, or mode; choose another job ID. "
                                     "Use resume --image-mode to change an existing job's image mode explicitly.")
+            if thumbnail_enabled is not None and thumbnail_enabled != store.manifest.thumbnail_enabled:
+                raise PipelineError("Existing job has a different thumbnail selection; use resume --thumbnail "
+                                    "or --no-thumbnail to change it explicitly.")
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
                                                   image_strategy="native_text", image_mode=config.image_mode,
+                                                  thumbnail_enabled=thumbnail_enabled is not False,
                                                   script_input_hash=script_input_hash, fps=config.fps))
         if script is not None:
             atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
@@ -131,6 +137,59 @@ class Pipeline:
                               "prompt": METADATA_PROMPT, "schema": METADATA_SCHEMA},
                               "video_metadata.json", lambda: self.providers.metadata(script.narration),
                               validate=validate_metadata)
+
+    def thumbnail_plan(self, script: Script, title: str) -> dict:
+        def plan():
+            data = self.providers.thumbnail(script.narration, title)
+            validate_thumbnail(data)
+            headline = data["headline"].strip().upper()
+            return {"headline": headline, "prompt": thumbnail_prompt(headline, data["prompt"], STYLE, THUMBNAIL_LAYOUT)}
+
+        def validate(data):
+            validate_thumbnail(data)
+            suffix = thumbnail_prompt(data["headline"], "", STYLE, THUMBNAIL_LAYOUT)
+            if (data["headline"] != data["headline"].strip().upper()
+                    or not data["prompt"].endswith(suffix) or not data["prompt"][:-len(suffix)].strip()):
+                raise TemporaryError("Invalid thumbnail plan: missing uppercase headline or fixed style/layout instructions")
+
+        return self.json_task("thumbnail.plan", {"narration": script.narration, "title": title,
+                              "text_generation": self.config.text_cache_settings, "schema": THUMBNAIL_SCHEMA,
+                              "prompt": THUMBNAIL_PROMPT, "style": STYLE, "layout": THUMBNAIL_LAYOUT},
+                              "thumbnail_prompt.json", plan, validate=validate)
+
+    def thumbnail(self, script: Script, title: str):
+        """Prepare an independent thumbnail without blocking the video on failure."""
+        store = self.store
+        report = {"status": "waiting_for_image", "prompt": "thumbnail_prompt.json",
+                  "image": "thumbnail.png", "error": None}
+        try:
+            plan = self.thumbnail_plan(script, title)
+            destination = store.path("thumbnail.png")
+            if store.manifest.image_mode == "external":
+                if destination.is_file():
+                    validation = media.check_image(destination)
+                    store.task("thumbnail.image", {"prompt": plan["prompt"], "source": "external",
+                               "image": validation["sha256"], "version": 1}, lambda: {
+                                   "files": ["thumbnail.png"], "source": "external", "validation": validation})
+                    report["status"] = "ready"
+            else:
+                store.task("thumbnail.image", {"prompt": plan["prompt"], "source": "api",
+                           "image_generation": self.config.image_cache_settings, "version": 1}, lambda: {
+                               "files": ["thumbnail.png"], "source": "api",
+                               "validation": self.generate_image(plan["prompt"], destination)})
+                report["status"] = "ready"
+        except Exception as exc:
+            report.update(status="failed", error=str(exc))
+        try:
+            write_json(store.path("thumbnail_report.json"), report)
+            store.log("thumbnail_status", **report)
+        except OSError:
+            if store.progress is not None:
+                store.progress.console("Warning: could not save the thumbnail report; video workflow continues.")
+        if store.progress is not None and report["status"] != "ready":
+            store.progress.console(f"Thumbnail {report['status']}; video workflow continues."
+                                   + (f" {report['error']}" if report["error"] else ""))
+        return report
 
     def speech(self, script: Script):
         store, manifest = self.store, self.store.manifest
@@ -290,6 +349,8 @@ class Pipeline:
         manifest.status, manifest.error = "running", None
         store.save()
         phases = (["narration", "metadata", "speech", "visuals", "images"] if manifest.mode in {"production", "script"} else [])
+        if phases and manifest.thumbnail_enabled:
+            phases.insert(2, "thumbnail")
         progress = WorkflowProgress(store, phases + ["render", "finish", "validate"])
         store.progress = progress
         try:
@@ -297,7 +358,10 @@ class Pipeline:
                 with progress.phase("narration"):
                     script = self.script()
                 with progress.phase("metadata"):
-                    self.metadata(script)
+                    metadata = self.metadata(script)
+                if manifest.thumbnail_enabled:
+                    with progress.phase("thumbnail"):
+                        self.thumbnail(script, metadata["title"])
                 with progress.phase("speech"):
                     words = self.speech(script)
                 with progress.phase("visuals"):

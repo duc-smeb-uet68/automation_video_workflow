@@ -134,6 +134,18 @@ class VideoMetadata(Record):
         return self
 
 
+class ThumbnailPlan(Record):
+    headline: str = Field(min_length=1, max_length=100)
+    prompt: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def meaningful_text(self):
+        if (not self.headline.strip() or "\n" in self.headline or "\r" in self.headline
+                or not self.prompt.strip()):
+            raise ValueError("Thumbnail requires a nonblank single-line headline and image prompt")
+        return self
+
+
 class Word(Record):
     text: str
     start: float = Field(ge=0)
@@ -182,6 +194,8 @@ class Manifest(Record):
     image_strategy: Literal["reference", "text_only", "native_text"] = "native_text"
     # Jobs saved before external images existed retain their original API workflow.
     image_mode: Literal["external", "api"] = "api"
+    # Existing jobs do not acquire new paid thumbnail requests on resume.
+    thumbnail_enabled: bool = False
     script_input_hash: str | None = None
     status: Literal["pending", "running", "waiting_for_images", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0

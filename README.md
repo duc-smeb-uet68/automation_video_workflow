@@ -1,6 +1,6 @@
 # Educational video automation
 
-A Python CLI turns a supplied narration file into a video title and description, timed speech, visual plans, images, and a validated video. External-image mode is the default: the CLI prepares narration, metadata, audio, alignment, subtitles, and standalone image prompts, then waits for you to generate the images elsewhere and copy them into the job's `images/` directory. Resume validates and adopts the supplied files before rendering. Optional API-image mode generates images automatically. Branch `codex/image-native-text` requests any needed short text directly inside the image; the planner specifies exact quoted wording, and the image AI chooses suitable placement. Script-file input is the default. Explicit topic mode also performs bounded research, script generation, and source auditing. Jobs use atomic local manifests, and one worker owns the jobs directory at a time.
+A Python CLI turns a supplied narration file into a video title and description, timed speech, visual plans, images, and a validated video. New script/topic jobs also prepare an independent doodle thumbnail with a big, bold uppercase headline across the top. External-image mode is the default: the CLI prepares narration, metadata, audio, alignment, subtitles, and standalone image prompts, then waits for you to generate the scene images elsewhere and copy them into the job's `images/` directory. Resume validates and adopts the supplied files before rendering. Optional API-image mode generates images automatically. Branch `codex/image-native-text` requests any needed short text directly inside the image; the planner specifies exact quoted wording, and the image AI chooses suitable placement. Script-file input is the default. Explicit topic mode also performs bounded research, script generation, and source auditing. Jobs use atomic local manifests, and one worker owns the jobs directory at a time.
 
 ## Setup
 
@@ -140,6 +140,24 @@ The job's `video_metadata.json` contains exactly `title` and `description`. The 
 
 Metadata has its own checkpoint, keyed by narration, text provider/model, prompt, and schema. Resume reuses valid metadata. Missing or corrupt output is regenerated without invalidating unchanged speech, images, or renders. Resuming an existing compatible script/topic job without metadata adds this text-provider request while preserving valid downstream checkpoints. Fixture and imported jobs retain their three rendering phases and do not generate metadata. If `spending_ceiling_usd` is set, configure a conservative `request_cost_caps_usd.metadata` value before running or resuming.
 
+## Doodle thumbnails
+
+New script/topic jobs enable thumbnails automatically. After metadata, the configured text provider reads the full finalized narration and generated video title. It chooses a short headline in the narration's language and describes one grounded visual idea, including subjects, appearance, actions, setting, colors, and composition. Code converts the headline to uppercase and adds the fixed doodle style and instructions for big, bold, high-contrast lettering across the top, safe margins, and main subjects below it. Headlines must be nonblank, occupy one line, and contain at most 100 characters, including after uppercase conversion. The exact complete prompt and headline are saved in `thumbnail_prompt.json`. The image AI draws the text directly in the image; there is no separate overlay or OCR check. Review generated spelling, readability, and visual grounding manually.
+
+Thumbnail delivery follows the job's saved `image_mode`. In external mode, generate the image from the saved prompt and copy it to the job root as `thumbnail.png`, alongside `manifest.json`, then resume. The workflow validates and adopts this file without overwriting its bytes or making image API calls. API mode sends the saved prompt unchanged to the existing image provider and uses its image validation, retries, and Gemini fallback. Thumbnail images use the existing approximately 16:9 raster checks, with at least 320×180 pixels; use a larger widescreen image for publication.
+
+`thumbnail_report.json` records `waiting_for_image`, `ready`, or `failed`, artifact paths, and any failure. CLI results and read-only `status` include a separate `thumbnail` object with readiness and absolute paths. A missing, invalid, or failed thumbnail never blocks speech, scene preparation, rendering, or video completion. Overall `waiting_for_images` concerns scene images only; a video can be `completed` while its thumbnail still needs attention. Resume refreshes thumbnail readiness; `resume --retry-failed` grants failed thumbnail stages another bounded retry batch. Valid speech, scene images, clips, and video remain reusable.
+
+```powershell
+python -m video_automation run .\narration.txt --no-thumbnail
+python -m video_automation resume JOB_ID --thumbnail
+python -m video_automation resume JOB_ID --no-thumbnail
+```
+
+The `--thumbnail` / `--no-thumbnail` flags are available on `run` and `resume`. New jobs default to enabled; existing jobs retain their saved selection, and manifests without `thumbnail_enabled` remain disabled. Change an existing job's selection through `resume`, not `run`. Thumbnail selection does not change job identity. Disabling thumbnails preserves their existing files. Fixture and imported jobs skip thumbnail generation.
+
+The independent `thumbnail.plan` checkpoint includes narration, title, text model, schema, style, and planning/layout instructions. `thumbnail.image` includes the complete prompt and API image settings, or the externally supplied file hash. Replacing a thumbnail or changing only thumbnail instructions does not invalidate video checkpoints. External thumbnail checkpoints do not depend on image API settings or credentials. Planning reserves a `thumbnail` request cap; automatic generation reserves the existing `image` cap. Thumbnail budget failures are reported separately and the video continues.
+
 ## Artifacts
 
 Each input receives a stable job directory, `jobs/video_native_text_<input-hash>/`. API-image jobs retain the original topic/script hashes; external-image jobs additionally hash their image mode to keep their default directories distinct. `--job-id` provides an optional administrative name. New manifests use `schema_version: 2`; generated jobs record `image_strategy: "native_text"`. Cue records have no `overlay_text` or `overlay_path` fields.
@@ -155,6 +173,8 @@ This workflow applies only to new jobs. Older manifests and incompatible generat
 | `script.txt`, `script.json` | Exact normalized narration and stable paragraph/sentence IDs |
 | `source_audit.json` | Separate model audit of every sentence's source support; topic mode only |
 | `video_metadata.json` | Generated title and description based on the finalized narration; script and topic modes |
+| `thumbnail_prompt.json` | Uppercase headline and complete standalone doodle thumbnail prompt; enabled script/topic jobs |
+| `thumbnail.png`, `thumbnail_report.json` | Independent thumbnail image and readiness/failure report; the image is not required for video completion |
 | `audio/narration.wav`, `alignment.json` | Final decoded audio and character, word, sentence timing |
 | `transcript.json`, `visuals/` | Permanent cue IDs and scene plans |
 | `external_images.json` | Expected image paths, valid image count, and missing/invalid file details in external-image mode |
@@ -174,7 +194,7 @@ HTTP failures save selected, redacted provider error fields and any available re
 
 ## Workflow progress
 
-`run`, `resume`, `fixture`, and `import-assets` show live progress on stderr. Stdout retains the final JSON result. Generated jobs have eight phases: narration preparation, metadata generation, speech, visual planning, image generation or external-image adoption, clip rendering, audio finishing, and validation. Fixture and imported jobs have the final three phases. Research, drafting, and source auditing appear as tasks within narration preparation.
+`run`, `resume`, `fixture`, and `import-assets` show live progress on stderr. Stdout retains the final JSON result. Generated jobs with thumbnails have nine phases: narration preparation, metadata generation, thumbnail preparation, speech, visual planning, image generation or external-image adoption, clip rendering, audio finishing, and validation. Jobs with thumbnails disabled retain eight phases. The thumbnail phase can report a missing or failed thumbnail while the video workflow continues. Fixture and imported jobs have the final three phases. Research, drafting, and source auditing appear as tasks within narration preparation.
 
 Progress shows the active task, attempt limit, cached tasks, and completed batches, images, or clips when their totals are known. Cue-derived totals remain dynamic. Counts describe completed work rather than estimated time remaining; phases have different costs and durations. Clip counts do not mark rendering complete until rough-cut assembly also finishes. Completion is reported only after validation passes.
 
@@ -216,7 +236,9 @@ Audio finishing uses two-pass loudness normalization. Optional local music loops
 
 Every attempted provider request records status, available provider usage, response location, and request ID. No price is invented for unknown usage. By default `spending_ceiling_usd` is `null`; provider billing limits should be configured on the provider accounts.
 
-An optional local budget uses conservative, operator-supplied **maximum request costs**, keyed by operation: `research`, `script`, `source_audit`, `metadata`, `speech`, `visuals`, and `image`. If a ceiling is set, every requested operation must have a cap. Before each request, the pipeline reserves that cap and refuses requests that would exceed the job ceiling. Each OpenRouter attempt, Gemini fallback request, and Gemini key change reserves a separate `image` cap; configure that cap to cover both image providers. Reservations remain charged against the local allowance even after timeouts or failed responses. This bounds the local ledger only to the extent that the supplied caps truly cover provider charges. It is not a provider-enforced billing limit. Model and tool prices must be checked when configuring those caps.
+An optional local budget uses conservative, operator-supplied **maximum request costs**, keyed by operation: `research`, `script`, `source_audit`, `metadata`, `thumbnail`, `speech`, `visuals`, and `image`. If a ceiling is set, every requested operation must have a cap. Before each request, the pipeline reserves that cap and refuses requests that would exceed the job ceiling. Each OpenRouter attempt, Gemini fallback request, and Gemini key change reserves a separate `image` cap; configure that cap to cover both image providers, including thumbnail requests in API mode. Reservations remain charged against the local allowance even after timeouts or failed responses. This bounds the local ledger only to the extent that the supplied caps truly cover provider charges. It is not a provider-enforced billing limit. Model and tool prices must be checked when configuring those caps.
+
+For example, if your conservative maximum for one thumbnail-planning request is USD 0.25, add `"thumbnail": 0.25` to your existing `request_cost_caps_usd` map. This illustrates the configuration syntax, not a provider price estimate. Keep caps for the other requested operations and supply your own researched bounds. With no retries or fallback, an uncached thumbnail normally adds one text request and, in API mode, one image request. External mode adds no image requests.
 
 ## Renderer fixtures and existing assets
 

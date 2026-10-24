@@ -75,8 +75,8 @@ def test_preparation_waits_with_all_handoff_files_and_no_image_attempts(config, 
     assert len(result["missing_images"]) == len(store.manifest.cues)
     progress = read_progress(store.folder)
     assert progress["status"] == progress["phase_status"] == "waiting_for_images"
-    assert progress["phase"] == "images" and progress["completed_phases"] == 4
-    assert progress["total_phases"] == 8
+    assert progress["phase"] == "images" and progress["completed_phases"] == 5
+    assert progress["total_phases"] == 9
     before = list(provider.calls)
     resumed = Pipeline(Store(store.folder, config), provider)
     assert resumed.run()["status"] == "waiting_for_images"

@@ -1,6 +1,20 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-10-23. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+Latest offline verification on 2026-10-24. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+
+## Independent doodle thumbnails
+
+New script/topic jobs enable an independent thumbnail phase immediately after metadata. The configured text provider receives the full finalized narration and video title, and returns a short headline and standalone visual description. Code uppercases the headline and saves the complete doodle image prompt with big, bold lettering across the top, strong contrast, safe margins, and subjects below the text in `thumbnail_prompt.json`. The image AI draws the lettering directly; there are no separate overlays or OCR checks.
+
+External mode adopts a validated job-root `thumbnail.png` without modifying the supplied bytes or calling image APIs. API mode sends the saved prompt unchanged through the existing image generation, validation, retries, and Gemini fallback. `thumbnail_report.json` and CLI/status output report thumbnail readiness independently. Missing images, invalid files, exhausted retries, refusals, and thumbnail budget errors do not stop the video workflow. Interruptions still propagate normally.
+
+Existing jobs without `thumbnail_enabled` remain disabled. `run` and `resume` expose `--thumbnail` / `--no-thumbnail`; changing an existing job's selection requires `resume`. Fixture/imported jobs skip thumbnails. Job identities and video checkpoints remain unchanged. Thumbnail planning uses its own `thumbnail` request reservation, and API images retain the shared `image` reservations, including separate fallback attempts.
+
+Focused thumbnail/external-image checks pass **52 tests** in **42.09 seconds**. After additional cache, CLI, status, and replacement cases, the complete offline suite passes **340 tests** in **103.72 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/thumbnail-full`. Coverage includes both text-provider HTTP contracts, full context and exact saved image prompts, uppercase layout instructions, malformed/cached plans, refusals, budgets, external adoption/replacements, API image retries, OpenRouter-to-Gemini fallback, old-job preservation, enablement, read-only status, progress, and interruption behavior.
+
+Real FFmpeg checks complete videos despite thumbnail planning/image failures or missing external thumbnails. Explicit retry recovery and supplied-thumbnail replacement preserve speech, scene images, clips, and final-video hashes. Replacement checks also preserve media modification times; subtitles retain identical content through the existing resume rewrite. Changing only thumbnail layout instructions reuses video artifacts.
+
+Run/resume CLI help and `git diff --check` pass. No live generation requests were made, and no retained jobs, local configuration, credentials, or existing source assets were changed. Generated thumbnail appearance, typography, and factual grounding still require live visual review. The sections below retain earlier verification evidence.
 
 ## Narration without a character-range requirement
 

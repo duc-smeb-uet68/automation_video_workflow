@@ -9,7 +9,7 @@ from pathlib import Path
 from . import assets, media
 from .models import Config
 from .pipeline import Pipeline
-from .progress import read_progress
+from .progress import read_progress, read_thumbnail
 from .providers import gemini_keys
 from .store import PipelineError, Store, worker_lock, write_json
 
@@ -86,6 +86,9 @@ def main(argv=None):
     resume.add_argument("job")
     resume.add_argument("--retry-failed", action="store_true", help="Explicitly grant failed stages one new bounded retry batch")
     resume.add_argument("--image-mode", choices=("external", "api"), help="Explicitly change the job's saved image mode")
+    for command in (run, resume):
+        command.add_argument("--thumbnail", action=argparse.BooleanOptionalAction, default=None,
+                             help="Enable/disable the independent doodle thumbnail; new jobs enable it, resume keeps saved selection")
     status = commands.add_parser("status", help="Read saved workflow progress without taking the worker lock")
     status.add_argument("job")
     validation = commands.add_parser("validate", help="Validate final video and write quality_report.json")
@@ -131,9 +134,10 @@ def main(argv=None):
                 if args.input is None and args.script is None:
                     raise PipelineError("run requires a narration file; use --script PATH or --mode topic TOPIC")
                 if mode == "script":
-                    pipeline = Pipeline.create(config, job_id=args.job_id, script_path=args.script or Path(args.input))
+                    pipeline = Pipeline.create(config, job_id=args.job_id, script_path=args.script or Path(args.input),
+                                               thumbnail_enabled=args.thumbnail)
                 else:
-                    pipeline = Pipeline.create(config, args.input, args.job_id)
+                    pipeline = Pipeline.create(config, args.input, args.job_id, thumbnail_enabled=args.thumbnail)
                 if not pipeline.store.manifest.stages:
                     missing = [name for name in config.generation_keys
                                if not (gemini_keys() if name == "GEMINI_API_KEY" else os.environ.get(name))]
@@ -165,9 +169,15 @@ def main(argv=None):
                     from .kdenlive import export
                     print(str(export(store, args.template)))
                     return 0
+                if args.thumbnail and store.manifest.mode not in {"production", "script"}:
+                    raise PipelineError("Thumbnails are available only for script and topic jobs")
                 if args.image_mode is not None:
                     store.manifest.image_mode = args.image_mode
                     store.log("image_mode_selected", image_mode=args.image_mode)
+                    store.save()
+                if args.thumbnail is not None:
+                    store.manifest.thumbnail_enabled = args.thumbnail
+                    store.log("thumbnail_selected", enabled=args.thumbnail)
                     store.save()
                 if args.retry_failed:
                     for stage in store.manifest.stages.values():
@@ -183,6 +193,9 @@ def main(argv=None):
                       "subtitles": str(pipeline.store.path("subtitles.en.srt"))}
             if pipeline.store.manifest.mode in {"production", "script"}:
                 result["metadata"] = str(pipeline.store.path("video_metadata.json"))
+            thumbnail = read_thumbnail(pipeline.store.folder, pipeline.store.manifest.model_dump())
+            if thumbnail is not None:
+                result["thumbnail"] = thumbnail
             if pipeline.store.manifest.status == "waiting_for_images":
                 result.update(prompts=str(pipeline.store.path("image_prompts.json")),
                               images_dir=str(pipeline.store.path("images")),

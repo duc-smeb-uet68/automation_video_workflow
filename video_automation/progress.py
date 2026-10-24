@@ -95,11 +95,35 @@ class WorkflowProgress:
         self.publish(status.capitalize())
 
 
+def read_thumbnail(folder, manifest):
+    """Expose thumbnail readiness independently of video status, without writing files."""
+    if not manifest.get("thumbnail_enabled", False) or manifest.get("mode") not in {"production", "script"}:
+        return None
+    report = {"status": "waiting_for_image", "error": None}
+    path = folder / "thumbnail_report.json"
+    if path.is_file():
+        try:
+            saved = read_json(path)
+            if not isinstance(saved, dict) or saved.get("status") not in {"waiting_for_image", "ready", "failed"}:
+                raise ValueError("Invalid thumbnail report")
+            report.update(status=saved["status"], error=saved.get("error"))
+            if report["status"] == "ready" and not (folder / "thumbnail.png").is_file():
+                report.update(status="waiting_for_image", error="Thumbnail file is missing; resume to validate readiness.")
+        except (OSError, ValueError):
+            report.update(status="failed", error="Thumbnail report is unreadable; resume to refresh it.")
+    return {**report, "prompt": str(folder / "thumbnail_prompt.json"), "image": str(folder / "thumbnail.png"),
+            "report": str(path)}
+
+
 def read_progress(folder):
     """Read a job snapshot without taking the worker lock or writing any files."""
     manifest = read_json(folder / "manifest.json")
     path = folder / "progress.json"
     progress = read_json(path) if path.is_file() else {}
-    return {**progress, "job_id": manifest["job_id"], "mode": manifest["mode"],
+    result = {**progress, "job_id": manifest["job_id"], "mode": manifest["mode"],
             "image_mode": manifest.get("image_mode", "api"),
             "status": manifest["status"], "error": manifest.get("error"), "progress_available": bool(progress)}
+    thumbnail = read_thumbnail(folder, manifest)
+    if thumbnail is not None:
+        result["thumbnail"] = thumbnail
+    return result
