@@ -147,3 +147,4 @@ The recorded live topic-to-video acceptance remains deferred in `IMPLEMENTATION_
 - Add regression coverage for changed invariants, retries, cache inputs, or timing. Documentation-only changes need command/reference checks rather than new tests.
 - Update `README.md` and setup templates when public commands or configuration change. Update `IMPLEMENTATION_STATUS.md` only with observed evidence.
 - Keep secrets, generated media, virtual environments, and local configuration untracked. Preserve user edits and existing job artifacts.
+-Always make a commit after a explicit change
