@@ -8,3 +8,5 @@ jobs/
 config.local.json
 
 narration.txt
+
+script/
