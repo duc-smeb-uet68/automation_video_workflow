@@ -1,6 +1,18 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-10-24. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+Latest offline verification on 2026-10-26. Branch `codex/image-native-text` has not undergone live generation acceptance. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research; full live video acceptance remains incomplete.
+
+## Explicit script pauses
+
+New supplied scripts accept whitespace-separated `[pause=1s]` markers, including decimal durations, leading/trailing pauses, and consecutive pauses. Durations must be positive, round to at least one 48 kHz audio sample, and not exceed 60 seconds each. Invalid markers and empty spoken narration are rejected before job creation or provider requests. The input snapshot and job identity retain the original normalized control text; the manifest records typed pause instructions. Older jobs default to no pause instructions and retain their existing behavior and speech decoding cache inputs.
+
+Metadata, thumbnail planning, speech, visual planning, and subtitles receive only the spoken narration. The existing single timestamped speech response is verified before local PCM silence is inserted. Adjusted word and sentence timestamps and exact insertion ranges are stored in `alignment.json`. Cue boundaries keep captions out of the inserted silence and extend the preceding image until the next cue. Original provider responses remain available, and corrupt audio rebuilds from cached speech without repeating a provider request or duplicating pauses.
+
+Validation verifies pause instructions against the saved input, recomputes timestamp shifts from the original provider alignment, and checks the inserted PCM samples for exact silence. Declared pauses are excluded from excessive-silence failures only after those checks pass; unrelated long silences still fail. Background music remains independent of the voice pause.
+
+Focused pause checks pass **39 tests** in **15.97 seconds**, using `.venv/Scripts/python.exe -m pytest -q tests/test_pauses.py -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/pauses-focused`. The complete offline suite passes **379 tests** in **134.93 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=D:/duc/startUp/demo/.test-tmp/pauses-full`. Coverage includes exact sample preservation and silence, timestamp shifts, invalid inputs, job identity, legacy compatibility, corruption recovery, external-image handoff, and real MP4 rendering with and without music. Cached resumes preserve narration, alignment, rough-video, and final-video hashes and modification times without new provider calls.
+
+CLI `run --help` and `git diff --check` pass. No live generation requests were made, and no retained jobs, local configuration, or credentials were changed. Live speech quality remains unverified; this change adds silence to the generated speech rather than directing the provider's prosody.
 
 ## Independent doodle thumbnails
 

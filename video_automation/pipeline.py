@@ -5,6 +5,7 @@ import io
 import json
 import math
 import re
+import wave
 from pathlib import Path
 
 from PIL import Image
@@ -16,7 +17,7 @@ from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH
                         STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_PROMPT,
                         Providers, thumbnail_prompt, validate_metadata, validate_thumbnail, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
-from .timing import aligned_words, make_script, normalize, segment_words, subtitles
+from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
 
 
 class ImagesPending(Exception):
@@ -35,13 +36,19 @@ class Pipeline:
     @classmethod
     def create(cls, config, topic: str | None = None, job_id: str | None = None, *,
                script_path: Path | None = None, thumbnail_enabled: bool | None = None):
-        script = make_script(script_path.read_text(encoding="utf-8-sig")) if script_path is not None else None
+        script_input, pauses = None, []
+        if script_path is not None:
+            script_input = normalize(script_path.read_text(encoding="utf-8-sig"))
+            narration, pauses = parse_script_input(script_input)
+            script = make_script(narration)
+        else:
+            script = None
         mode = "script" if script is not None else "production"
-        script_input_hash = digest(script.narration) if script is not None else None
+        script_input_hash = digest(script_input) if script is not None else None
         topic = (topic or (script_path.stem if script_path is not None else "")).strip()
         if not topic:
             raise PipelineError("Topic cannot be empty")
-        identity = {"mode": mode, "narration": script.narration} if script is not None else topic
+        identity = {"mode": mode, "narration": script_input} if script is not None else topic
         if config.image_mode == "external":
             identity = {"input": identity, "image_mode": "external"}
         job_id = job_id or "video_native_text_" + digest(identity)[:12]
@@ -59,13 +66,15 @@ class Pipeline:
             if thumbnail_enabled is not None and thumbnail_enabled != store.manifest.thumbnail_enabled:
                 raise PipelineError("Existing job has a different thumbnail selection; use resume --thumbnail "
                                     "or --no-thumbnail to change it explicitly.")
+            if pauses != store.manifest.script_pauses:
+                raise PipelineError("Existing job has different pause instructions; choose another job ID")
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
                                                   image_strategy="native_text", image_mode=config.image_mode,
                                                   thumbnail_enabled=thumbnail_enabled is not False,
-                                                  script_input_hash=script_input_hash, fps=config.fps))
+                                                  script_input_hash=script_input_hash, script_pauses=pauses, fps=config.fps))
         if script is not None:
-            atomic_bytes(store.path("input_script.txt"), script.narration.encode("utf-8"))
+            atomic_bytes(store.path("input_script.txt"), script_input.encode("utf-8"))
         return cls(store)
 
     def json_task(self, name, inputs, relative, action, validate=None):
@@ -93,6 +102,10 @@ class Pipeline:
             narration = store.path("input_script.txt").read_text(encoding="utf-8")
             if digest(narration) != manifest.script_input_hash:
                 raise PipelineError("Saved input script hash mismatch; rerun with the original narration file to restore it")
+            if manifest.script_pauses:
+                narration, pauses = parse_script_input(narration)
+                if pauses != manifest.script_pauses:
+                    raise PipelineError("Saved pause instructions do not match the input script")
             return self.save_script(make_script(narration))
         research = self.json_task("research", {"topic": manifest.topic, "text_generation": self.config.text_cache_settings, "prompt": RESEARCH_PROMPT},
                                   "sources.json", lambda: self.providers.research(manifest.topic))
@@ -210,20 +223,32 @@ class Pipeline:
             temporary = audio.with_suffix(".tmp.wav")
             media.ffmpeg(self.config, "-loglevel", "error", "-i", store.path("audio/provider.mp3"),
                          "-vn", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", temporary)
-            temporary.replace(audio)
-            duration = media.audio_duration(self.config, audio)
+            duration = media.audio_duration(self.config, temporary)
             alignment = speech.get("alignment")
             if not alignment:
                 raise PipelineError("Speech provider returned no original character alignment; realignment is required")
+            pause_data = {}
+            if manifest.script_pauses:
+                with wave.open(str(temporary), "rb") as decoded:
+                    source_frames = decoded.getnframes()
+                alignment, insertions = pause_timing(script, alignment, source_frames, manifest.script_pauses)
+                media.insert_silence(temporary, insertions)
+                duration = (source_frames + sum(p["frames"] for p in insertions)) / SPEECH_SAMPLE_RATE
+                pause_data["pauses"] = insertions
             words = aligned_words(script, alignment, duration)
+            temporary.replace(audio)
             sentences = [{"id": sentence.id, "text": sentence.text,
                           "start": min(w.start for w in words if w.sentence_id == sentence.id),
                           "end": max(w.end for w in words if w.sentence_id == sentence.id)} for sentence in script.sentences]
             write_json(store.path("alignment.json"), {"characters": alignment, "words": [w.model_dump() for w in words],
-                       "sentences": sentences, "audio_duration": duration, "audio_sha256": file_hash(audio)})
+                       "sentences": sentences, "audio_duration": duration, "audio_sha256": file_hash(audio), **pause_data})
             return {"files": ["audio/narration.wav", "alignment.json"], "duration": duration}
 
-        result = store.task("speech.decode", {"speech": digest(speech), "script": script.model_dump(), "decode_version": 1}, decode)
+        inputs = {"speech": digest(speech), "script": script.model_dump(), "decode_version": 1}
+        if manifest.script_pauses:
+            inputs["pauses"] = [p.model_dump() for p in manifest.script_pauses]
+            inputs["pause_version"] = 1
+        result = store.task("speech.decode", inputs, decode)
         manifest.audio_path = "audio/narration.wav"
         manifest.audio_duration = result["duration"]
         store.save()
@@ -232,7 +257,8 @@ class Pipeline:
 
     def visuals(self, words):
         store, manifest = self.store, self.store.manifest
-        cues = segment_words(words, self.config.fps, manifest.audio_duration)
+        cues = segment_words(words, self.config.fps, manifest.audio_duration,
+                             (p.word_index for p in manifest.script_pauses))
         if store.progress is not None:
             store.progress.set_total((len(cues) + 23) // 24, "batches")
         # Bounded batches prevent an entire long video from exceeding structured-output limits.

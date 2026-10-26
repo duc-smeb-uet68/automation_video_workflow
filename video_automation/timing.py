@@ -4,12 +4,40 @@ import math
 import re
 import textwrap
 
-from .models import Cue, Script, Sentence, Word
+from .models import Cue, Script, ScriptPause, Sentence, Word
 from .store import PipelineError
+
+
+SPEECH_SAMPLE_RATE = 48000
 
 
 def normalize(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def parse_script_input(text: str) -> tuple[str, list[ScriptPause]]:
+    """Separate explicit pauses from narration without changing other text."""
+    text = normalize(text)
+    pieces, pauses = [], []
+    offset, word_index = 0, 0
+    for marker in re.finditer(r"\[pause\b[^\]\r\n]*(?:\]|(?=\r|\n|$))", text, re.IGNORECASE):
+        match = re.fullmatch(r"\[pause=(\d+(?:\.\d+)?)s\]", marker.group())
+        seconds = float(match[1]) if match else 0
+        if not math.isfinite(seconds) or not 0 < seconds <= 60 or round(seconds * SPEECH_SAMPLE_RATE) < 1:
+            raise PipelineError("Invalid pause marker; use [pause=1s] with a positive duration of at most 60 seconds")
+        if ((marker.start() and not text[marker.start()-1].isspace())
+                or (marker.end() < len(text) and not text[marker.end()].isspace())):
+            raise PipelineError("Pause markers must be separated from words and other markers by whitespace")
+        piece = text[offset:marker.start()]
+        pieces.append(piece)
+        word_index += len(piece.split())
+        pauses.append(ScriptPause(word_index=word_index, seconds=seconds))
+        offset = marker.end()
+    pieces.append(text[offset:])
+    narration = normalize("".join(pieces))
+    if not narration:
+        raise PipelineError("Narration cannot be empty")
+    return narration, pauses
 
 
 def make_script(text: str, references=()) -> Script:
@@ -54,14 +82,54 @@ def aligned_words(script: Script, alignment: dict, duration: float) -> list[Word
     return words
 
 
-def segment_words(words: list[Word], fps: int, duration: float) -> list[Cue]:
+def pause_timing(script: Script, alignment: dict, source_frames: int,
+                 pauses: list[ScriptPause]) -> tuple[dict, list[dict]]:
+    """Offset verified provider timestamps by the exact inserted sample counts."""
+    duration = source_frames / SPEECH_SAMPLE_RATE
+    words = aligned_words(script, alignment, duration)
+    starts = list(alignment["character_start_times_seconds"])
+    ends = list(alignment["character_end_times_seconds"])
+    insertions, added_frames, previous_index = [], 0, 0
+    for pause in pauses:
+        index = pause.word_index
+        if index < previous_index or index > len(words):
+            raise PipelineError("Pause positions must follow narration word order")
+        if index == 0:
+            source_frame, char_offset = 0, 0
+        elif index == len(words):
+            source_frame, char_offset = source_frames, len(script.narration)
+        else:
+            if words[index-1].end > words[index].start:
+                raise PipelineError("Cannot insert a pause between overlapping speech word timestamps")
+            source_frame = round(words[index-1].end * SPEECH_SAMPLE_RATE)
+            char_offset = words[index-1].char_end
+        frames = round(pause.seconds * SPEECH_SAMPLE_RATE)
+        if frames < 1 or not 0 <= source_frame <= source_frames:
+            raise PipelineError("Pause duration or position is outside the decoded audio")
+        start = (source_frame + added_frames) / SPEECH_SAMPLE_RATE
+        insertions.append({"word_index": index, "source_frame": source_frame, "frames": frames,
+                           "start": start, "end": (source_frame + added_frames + frames) / SPEECH_SAMPLE_RATE})
+        shift = frames / SPEECH_SAMPLE_RATE
+        for char_index in range(char_offset, len(starts)):
+            starts[char_index] += shift
+            ends[char_index] += shift
+        added_frames += frames
+        previous_index = index
+    shifted = {**alignment, "character_start_times_seconds": starts, "character_end_times_seconds": ends}
+    aligned_words(script, shifted, (source_frames + added_frames) / SPEECH_SAMPLE_RATE)
+    return shifted, insertions
+
+
+def segment_words(words: list[Word], fps: int, duration: float, pause_word_indices=()) -> list[Cue]:
     groups = []
     first = 0
+    pause_word_indices = set(pause_word_indices)
     for index, word in enumerate(words):
         last = index == len(words) - 1
         sentence_end = last or words[index + 1].sentence_id != word.sentence_id
         count = index - first + 1
-        if last or (count >= 4 and sentence_end) or count >= 14 or word.end - words[first].start >= 5:
+        if (last or index + 1 in pause_word_indices or (count >= 4 and sentence_end)
+                or count >= 14 or word.end - words[first].start >= 5):
             groups.append((first, index + 1))
             first = index + 1
     # Merge boundaries that round onto the same frame. All text stays present.

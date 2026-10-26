@@ -123,6 +123,11 @@ class Script(Record):
     source_references: list[str] = Field(default_factory=list)
 
 
+class ScriptPause(Record):
+    word_index: int = Field(ge=0)
+    seconds: float = Field(gt=0, le=60)
+
+
 class VideoMetadata(Record):
     title: str = Field(min_length=1, max_length=100)
     description: str = Field(min_length=1, max_length=5000)
@@ -197,6 +202,7 @@ class Manifest(Record):
     # Existing jobs do not acquire new paid thumbnail requests on resume.
     thumbnail_enabled: bool = False
     script_input_hash: str | None = None
+    script_pauses: list[ScriptPause] = Field(default_factory=list)
     status: Literal["pending", "running", "waiting_for_images", "failed", "completed", "interrupted"] = "pending"
     script_character_count: int = 0
     fps: int = 30
@@ -207,3 +213,11 @@ class Manifest(Record):
     stages: dict[str, Stage] = Field(default_factory=dict)
     usage: list[dict] = Field(default_factory=list)
     error: str | None = None
+
+    @model_validator(mode="after")
+    def pause_order(self):
+        if self.script_pauses and self.mode != "script":
+            raise ValueError("Pause instructions require script mode")
+        if any(a.word_index > b.word_index for a, b in zip(self.script_pauses, self.script_pauses[1:])):
+            raise ValueError("Pause instructions must follow narration word order")
+        return self

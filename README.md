@@ -66,7 +66,7 @@ python -m video_automation run .\narration.txt
 python -m video_automation run --script .\narration.txt
 ```
 
-Script mode skips research, drafting, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. Empty normalized files stop before generation requests. There is no project-level narration-length requirement or automatic length revision in either input mode. The normalized text is sent unchanged to ElevenLabs, subject to the selected speech model's request limit. Exact character alignment, timed transcripts, visual planning, image preparation, rendering, and validation still run. The text provider is still required for metadata and visual planning.
+Script mode skips research, drafting, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. Explicit pause markers are separated from the spoken text as described below; all other narration text is preserved. Empty normalized narration stops before generation requests. There is no project-level narration-length requirement or automatic length revision in either input mode. The spoken text is sent unchanged to ElevenLabs, subject to the selected speech model's request limit. Exact character alignment, timed transcripts, visual planning, image preparation, rendering, and validation still run. The text provider is still required for metadata and visual planning.
 
 Each script job stores an `input_script.txt` snapshot and its hash. `resume JOB_ID` reads that snapshot, so moving, editing, or deleting the original file does not change an existing job. Running a changed script creates a different default job. Reusing an explicit `--job-id` with different content or a different mode is rejected. If the saved snapshot is missing or corrupt, rerun with the original narration file and the same job ID to restore it. Input-file paths resolve against the working directory.
 
@@ -77,6 +77,30 @@ python -m video_automation run --mode topic 'Who Watched the Baby While Ancient 
 ```
 
 `input_mode` defaults to `"script"`, including when an existing configuration omits the field. Set it to `"topic"` to make positional inputs topics again. `--mode` overrides the configured default; `--script` always selects script mode and cannot be combined with a positional input or `--mode topic`. Existing manifests retain their recorded mode when resumed; topic jobs remain labeled `production`, and supplied-script jobs use `script`.
+
+## Explicit narration pauses
+
+In a new script-mode job, write `[pause=1s]` where you want to add one second of voice silence. Decimal durations such as `[pause=0.5s]` also work:
+
+```text
+Think about that.
+[pause=1s]
+Now consider another possibility.
+```
+
+Run the narration file with the usual command:
+
+```powershell
+python -m video_automation run .\narration.txt
+```
+
+Markers must use the exact lowercase syntax and be separated from words and other markers by whitespace. Each duration must be positive, at most 60 seconds, and long enough to represent at least one sample at 48 kHz. Markers can appear before the first word, between words, or after the final word. Consecutive markers add their durations. Invalid markers and files containing only pause markers fail before job creation or provider requests.
+
+The original normalized input, including markers, stays in `input_script.txt`. `script.txt`, metadata, thumbnail planning, speech, subtitles, and visual prompts use only the spoken narration. The pipeline makes the usual single speech request, verifies its original character alignment, and inserts zero-valued PCM samples locally. The requested duration is rounded to the nearest audio sample and adds to any natural pause already present in the generated voice. Background music can continue during voice silence.
+
+Word and sentence timestamps shift after each insertion. Cues split at pauses so captions do not span the inserted silence, and the preceding scene remains visible until the next cue starts. Leading silence displays the first scene, while trailing silence extends the last scene. `alignment.json` records the exact inserted sample ranges and adjusted timestamps. Validation checks these ranges against the saved input, original provider alignment, and silent audio samples; intentional pauses can exceed the usual long-silence threshold without allowing unrelated long silences.
+
+Pause instructions are saved in the manifest and included in the audio decoding checkpoint. Resume uses the saved input snapshot, and rebuilding damaged audio reuses a valid speech response instead of buying speech again or inserting pauses twice. Changing the input markers creates a different default job; reusing an explicit job ID with changed input is rejected. Older jobs without saved pause instructions retain their original behavior. This syntax applies to supplied scripts, not topic-generated narration or provider-specific SSML/audio tags.
 
 ## Text provider and model
 
@@ -222,7 +246,7 @@ Temporary HTTP failures, transport errors, missing image responses, and invalid 
 
 Visual batches must contain every requested cue ID exactly once in order, with valid scene descriptions, character IDs, and motion settings. The requested output schema constrains the cue count and allowed IDs for each batch. Malformed visual output is rejected before a checkpoint is marked completed and receives the existing bounded retries. Visual responses with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"` also receive those retries, and the error reports the token-limit reason. Partial output is never approved. Refusals and other incomplete-response reasons still stop immediately. Cached batches from older runs are revalidated before reuse. Invalid cached batches are retried within their remaining attempt budget, while valid earlier batches and completed speech remain cached. Later batches are regenerated when their continuity inputs change. Raw provider responses remain available for diagnosis.
 
-The recorded character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken. Narration must be nonempty; no character-range gate or automatic length revision applies. Final validation retains the historical `narration_length` report key to check nonempty text, normalization, and the recorded character count, with `enforced: false` indicating that length bounds are disabled. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Timing is frozen after audio decoding; later speech changes require regeneration and alignment.
+The recorded character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken; explicit script pause markers remain in the input snapshot and are not counted as narration. Narration must be nonempty; no character-range gate or automatic length revision applies. Final validation retains the historical `narration_length` report key to check nonempty text, normalization, and the recorded character count, with `enforced: false` indicating that length bounds are disabled. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Explicit pauses shift verified timestamps by their inserted sample counts before timing is frozen after audio decoding; later speech changes require regeneration and alignment.
 
 Visual cues follow aligned words and sentence boundaries. Their count is dynamic. Frame durations derive from adjacent absolute boundaries. Boundaries that collapse onto one frame are merged without dropping text. The first visual starts at frame zero; the last image holds until the final recording ends. Output may pad the final audio by less than one frame to match the encoded video.
 

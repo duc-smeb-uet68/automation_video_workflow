@@ -4,12 +4,13 @@ import json
 import math
 import re
 import subprocess
+import wave
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from .store import PipelineError, atomic_bytes, file_hash, write_json
-from .timing import assign_frames, normalize, subtitles
+from .store import PipelineError, atomic_bytes, digest, file_hash, read_json, write_json
+from .timing import SPEECH_SAMPLE_RATE, aligned_words, assign_frames, make_script, normalize, parse_script_input, pause_timing, subtitles
 
 
 def run(command: list[str]) -> str:
@@ -37,6 +38,35 @@ def audio_duration(config, path: Path) -> float:
     if not math.isfinite(duration) or duration <= 0:
         raise PipelineError(f"Invalid audio duration: {path}")
     return duration
+
+
+def insert_silence(path: Path, insertions: list[dict]):
+    """Stream PCM samples into a replacement WAV with explicit silent intervals."""
+    temporary = path.with_suffix(".pauses.tmp.wav")
+    try:
+        with wave.open(str(path), "rb") as source, wave.open(str(temporary), "wb") as output:
+            if (source.getframerate(), source.getnchannels(), source.getsampwidth()) != (SPEECH_SAMPLE_RATE, 1, 2):
+                raise PipelineError("Pause insertion requires 48 kHz mono PCM16 audio")
+            output.setparams(source.getparams())
+            cursor = 0
+            for pause in insertions:
+                target = pause["source_frame"]
+                if not cursor <= target <= source.getnframes():
+                    raise PipelineError("Pause positions must follow decoded audio sample order")
+                while cursor < target:
+                    count = min(65536, target - cursor)
+                    output.writeframesraw(source.readframes(count))
+                    cursor += count
+                remaining = pause["frames"]
+                while remaining:
+                    count = min(65536, remaining)
+                    output.writeframesraw(b"\0\0" * count)
+                    remaining -= count
+            while content := source.readframes(65536):
+                output.writeframesraw(content)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def check_image(path: Path) -> dict:
@@ -180,6 +210,56 @@ def audio_health(config, path: Path, duration: float) -> dict:
     return {"peak_dbfs": max(peaks) if peaks else None, "long_silences": intervals}
 
 
+def unexpected_silences(intervals: list[dict], pauses: list[dict], threshold: float) -> list[dict]:
+    """Keep excessive silence outside the declared pause intervals."""
+    if not pauses:
+        return intervals
+    unexpected = []
+    for interval in intervals:
+        cursor = interval["start"]
+        for pause in pauses:
+            if pause["end"] <= cursor or pause["start"] >= interval["end"]:
+                continue
+            if pause["start"] - cursor >= threshold:
+                unexpected.append({"start": cursor, "end": pause["start"]})
+            cursor = max(cursor, pause["end"])
+        if interval["end"] - cursor >= threshold:
+            unexpected.append({"start": cursor, "end": interval["end"]})
+    return unexpected
+
+
+def validate_pauses(store, script_text: str, alignment: dict) -> list[dict]:
+    """Verify pause instructions, shifted timestamps, and exact silent samples."""
+    manifest = store.manifest
+    if manifest.mode != "script" or not manifest.script_pauses:
+        raise PipelineError("Unexpected pause data without script pause instructions")
+    snapshot = store.path("input_script.txt").read_text(encoding="utf-8")
+    narration, pauses = parse_script_input(snapshot)
+    if digest(snapshot) != manifest.script_input_hash or narration != script_text or pauses != manifest.script_pauses:
+        raise PipelineError("Pause instructions do not match the saved input script")
+    script = make_script(script_text)
+    with wave.open(str(store.path(manifest.audio_path)), "rb") as audio:
+        if (audio.getframerate(), audio.getnchannels(), audio.getsampwidth()) != (SPEECH_SAMPLE_RATE, 1, 2):
+            raise PipelineError("Pause validation requires 48 kHz mono PCM16 audio")
+        frames = audio.getnframes()
+        source_frames = frames - sum(round(p.seconds * SPEECH_SAMPLE_RATE) for p in pauses)
+        original = read_json(store.path("audio/speech_response.json"))["alignment"]
+        shifted, expected = pause_timing(script, original, source_frames, pauses)
+        words = aligned_words(script, shifted, frames / SPEECH_SAMPLE_RATE)
+        if (alignment.get("pauses") != expected or alignment["characters"] != shifted
+                or alignment["words"] != [w.model_dump() for w in words]):
+            raise PipelineError("Pause timing does not match verified provider alignment")
+        for pause in expected:
+            audio.setpos(round(pause["start"] * SPEECH_SAMPLE_RATE))
+            remaining = pause["frames"]
+            while remaining:
+                count = min(65536, remaining)
+                if audio.readframes(count) != b"\0\0" * count:
+                    raise PipelineError("Declared pause contains non-silent audio samples")
+                remaining -= count
+    return expected
+
+
 def validate(store) -> dict:
     config, manifest = store.config, store.manifest
     checks, details = {}, {}
@@ -219,10 +299,16 @@ def validate(store) -> dict:
           and all(c.end_frame > c.start_frame for c in manifest.cues)
           and all(a.end_frame == b.start_frame for a, b in zip(manifest.cues, manifest.cues[1:])))
     words_path = store.path("alignment.json")
+    intentional_pauses = []
     if words_path.is_file():
         try:
             alignment = json.loads(words_path.read_text(encoding="utf-8"))
             words = alignment["words"]
+            if manifest.script_pauses or alignment.get("pauses"):
+                def pause_check():
+                    intentional_pauses.extend(validate_pauses(store, script_text, alignment))
+                    return True
+                check("intentional_pauses", pause_check)
             expected = " ".join(w["text"] for w in words)
             check("alignment_audio_match", lambda: alignment["audio_sha256"] == file_hash(store.path(manifest.audio_path))
                   and abs(alignment["audio_duration"]-manifest.audio_duration) < 0.00001)
@@ -264,13 +350,17 @@ def validate(store) -> dict:
     check("decode", decode)
     try:
         health = audio_health(config, store.path("final.mp4"), manifest.total_frames/config.fps)
+        health["unexpected_long_silences"] = unexpected_silences(
+            health["long_silences"], intentional_pauses, config.max_silence_seconds)
         details["audio_health"] = health
         checks["no_clipping"] = health["peak_dbfs"] is not None and health["peak_dbfs"] < -0.1
-        checks["no_long_silence"] = not health["long_silences"]
+        checks["no_long_silence"] = not health["unexpected_long_silences"]
         source_health = audio_health(config, store.path(manifest.audio_path), manifest.audio_duration)
+        source_health["unexpected_long_silences"] = unexpected_silences(
+            source_health["long_silences"], intentional_pauses, config.max_silence_seconds)
         details["narration_health"] = source_health
         checks["narration_no_clipping"] = source_health["peak_dbfs"] is not None and source_health["peak_dbfs"] < -0.1
-        checks["narration_no_long_silence"] = not source_health["long_silences"]
+        checks["narration_no_long_silence"] = not source_health["unexpected_long_silences"]
     except Exception as exc:
         checks["no_clipping"] = checks["no_long_silence"] = False
         details["audio_error"] = str(exc)
