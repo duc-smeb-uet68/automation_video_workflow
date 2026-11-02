@@ -31,6 +31,25 @@ If the built-in tool is exposed, use its actual schema and the host's tool-call 
 
 Only report the tool as unavailable after checking the surfaces the session actually exposes. Name the checks and missing tool in the report. An installed skill supplies instructions; it cannot enable a tool withheld by the host. If the tool is genuinely absent, stop before paid preparation, suggest a new app chat with both `$imagegen` and `$video-workflow`, and explain that this may clarify routing but does not guarantee tool availability. Do not install an API client or request an API key to repair a missing built-in tool.
 
+## Provider network access and recovery
+
+Run provider commands with the network access required by the configured text and speech providers. If the host restricts network access, use its normal approval or escalation mechanism for those commands. Preserve the same interpreter, working directory, configuration, and job. Do not bypass a denied approval, disable security controls, or assume permission to change system network settings.
+
+If preparation fails with `ConnectError` or a DNS error, diagnose connectivity before consuming another generation retry batch. Use a short, unauthenticated, read-only request to the relevant provider's public endpoint; for OpenRouter, `https://openrouter.ai/api/v1/models` is suitable. Do not print credentials or proxy secrets. If the same probe fails in the sandbox but succeeds through approved network access, run subsequent provider commands through that approved mechanism. A successful public probe establishes connectivity only, not authenticated generation access. Do not assume every connection error has the same cause.
+
+When the user has authorized another retry batch, resume the existing job with `--retry-failed` through the approved network mechanism. Reuse that authorization without asking for the same retry again, while respecting any host approval requirement. Continue to the image handoff, built-in Codex image generation, rendering, and final validation. Preserve valid checkpoints and do not reset exhausted attempts repeatedly.
+
+Example recovery request, with `JOB_ID` replaced by the selected job:
+
+```text
+Use $video-workflow to resume JOB_ID with --retry-failed.
+Run provider commands outside the restricted sandbox using
+the normal network approval mechanism. Continue through
+Codex image generation and final video validation.
+```
+
+This example does not itself authorize retrying a job during skill installation or explanation. If network approval is denied or connectivity still fails, preserve progress and report the failed check and next required action without retrying generation.
+
 ## Prepare or resume the job
 
 For a new supplied-script job:
