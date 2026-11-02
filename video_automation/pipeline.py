@@ -14,7 +14,7 @@ from . import media
 from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
 from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
-                        STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_PROMPT,
+                        STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION,
                         Providers, thumbnail_prompt, validate_metadata, validate_thumbnail, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
@@ -279,9 +279,23 @@ class Pipeline:
         for offset in range(0, len(cues), 24):
             batch = cues[offset:offset+24]
             previous_scenes = records[-3:]
-            planned = self.json_task(f"visuals.{offset//24:03}", {"cues": [c.model_dump() for c in batch],
+            name = f"visuals.{offset//24:03}"
+            legacy_inputs = {"cues": [c.model_dump() for c in batch],
                                      "previous_scenes": previous_scenes,
-                                     "text_generation": self.config.text_cache_settings, "style": STYLE, "prompt": VISUAL_PROMPT},
+                                     "text_generation": self.config.text_cache_settings, "style": STYLE, "prompt": VISUAL_PROMPT}
+            inputs = {**legacy_inputs, "visual_response_version": VISUAL_RESPONSE_VERSION}
+            previous = manifest.stages.get(name)
+            # Valid canonical plans survive a wire-format change. Failed or
+            # invalid legacy plans receive the new, explicitly versioned input.
+            if previous and previous.status == "completed" and previous.input_hash == digest(legacy_inputs):
+                try:
+                    validate_visual_plan(batch, previous.result.get("data"))
+                    if previous.artifacts and all(store.path(p).is_file() and file_hash(store.path(p)) == h
+                                                  for p, h in previous.artifacts.items()):
+                        inputs = legacy_inputs
+                except (TemporaryError, OSError):
+                    pass
+            planned = self.json_task(name, inputs,
                                      f"visuals/batch_{offset//24:03}.json",
                                      lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes),
                                      validate=lambda planned, batch=batch: validate_visual_plan(batch, planned))
