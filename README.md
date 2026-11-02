@@ -12,7 +12,7 @@ python -m video_automation init
 Copy-Item .env.example .env
 ```
 
-Fill `.env` locally with `OPENROUTER_API_KEY` and `ELEVENLABS_API_KEY`. OpenRouter remains the default text provider (`openai/gpt-oss-120b`), including visual prompt planning, so external-image mode still needs its text key. External-image mode requires no image-provider credentials and makes no image API calls or image cost reservations. With `text_provider: "openai"`, only `OPENAI_API_KEY` and `ELEVENLABS_API_KEY` are needed for preparation. API-image mode defaults to OpenRouter images (`google/gemini-3.1-flash-lite-image`); optional Gemini keys enable image credit fallback. Set `voice_id` to an ElevenLabs voice available to your account. Nonempty process environment variables take precedence over `.env`. Keys are never stored in manifests or execution logs.
+Fill `.env` locally with `OPENROUTER_API_KEY` and, for the default ElevenLabs speech provider, `ELEVENLABS_API_KEY`. The installed VoiceStudio app is an optional speech provider; see its setup below. OpenRouter remains the default text provider (`openai/gpt-oss-120b`), including visual prompt planning, so external-image mode still needs its text key. External-image mode requires no image-provider credentials and makes no image API calls or image cost reservations. With `text_provider: "openai"`, only `OPENAI_API_KEY` and `ELEVENLABS_API_KEY` are needed for preparation. API-image mode defaults to OpenRouter images (`google/gemini-3.1-flash-lite-image`); optional Gemini keys enable image credit fallback. Set `voice_id` to an ElevenLabs voice available to your account. Nonempty process environment variables take precedence over `.env`. Keys are never stored in manifests or execution logs.
 
 `init` detects the existing `D:/kenlive/bin` FFmpeg installation when the tools are not on PATH. All other installations can set executable paths in configuration. Relative music and jobs paths resolve against the configuration file's directory. Legacy `character_reference` and `font_path` settings remain accepted but are ignored by setup checks and generation, and omitted from newly initialized configuration. `config.local.json` loads automatically when running from this directory; `--config` selects another setup file. `config.example.json` documents the main settings.
 
@@ -21,7 +21,53 @@ python -m video_automation doctor
 python -m video_automation run .\narration.txt
 ```
 
-The narration file is the initial per-video content input. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The project accepts any nonempty normalized script without a minimum or maximum character count. Speech generation still uses one timestamped request and checks the selected speech model's input limit before sending it.
+The narration file is the initial per-video content input. Model IDs, voice, resolution, retry limits, and optional music are configured once. The doodle style is fixed in code; the visual planner chooses characters appropriate to the narration. The project accepts any nonempty normalized script without a minimum or maximum character count. ElevenLabs speech uses one timestamped request and checks its selected model's input limit. VoiceStudio speech chunks long narration and runs local forced alignment as described below.
+
+## VoiceStudio speech from the installed app
+
+Speech defaults to `speech_provider: "elevenlabs"` for compatibility. To use the installed VoiceStudio application instead, install the optional local alignment dependencies in the project's virtual environment:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pip install -e '.[test,voicestudio]'
+```
+
+Add these settings to `config.local.json`, using your installed executable and a voice profile ID from VoiceStudio's `/v1/audio/voices` endpoint:
+
+```json
+{
+  "speech_provider": "voicestudio",
+  "voicestudio_base_url": "http://127.0.0.1:3900",
+  "voicestudio_executable": "C:/path/to/VoiceStudio/VoiceStudio.exe",
+  "voicestudio_auto_launch": true,
+  "voicestudio_model": "omnivoice",
+  "voicestudio_voice": "your-saved-profile-id",
+  "voicestudio_language": "en",
+  "voicestudio_speed": 1.0,
+  "image_mode": "external"
+}
+```
+
+Keep your existing text provider credentials. VoiceStudio speech does not require `ELEVENLABS_API_KEY` or reserve provider dollars. Set optional `VOICESTUDIO_API_KEY` in `.env` only if your local backend requires a bearer token. This integration accepts loopback HTTP endpoints only. English is the supported alignment language in this version.
+
+Download the chosen TTS engine and configure the voice in VoiceStudio once. No cloned VoiceStudio checkout is required. The video CLI checks the local API, starts the configured installed executable when needed, requests hidden startup on Windows, and waits up to 180 seconds. The app may still show its own window. The CLI never closes the application. Set `voicestudio_auto_launch: false` to open it yourself. Startup failures, missing voice profiles, missing engines, and incompatible API routes stop with an error; there is no automatic ElevenLabs fallback.
+
+Narration is sent automatically to `/v1/audio/speech` in unchanged, ordered chunks of at most 4,096 characters. Each WAV response has its own checkpoint. FFmpeg joins the audio as 48 kHz mono PCM16. Stable-ts then force-aligns the original narration on CPU using Whisper `base.en`; the first alignment downloads and caches the model weights. This is local timing computation, not transcription used to replace your text. Invalid, missing, or zero-duration word timing stops the job while preserving generated speech. Numerals, punctuation, Unicode, and exact original word offsets must survive alignment. Word timing is explicitly identified in `alignment.json`; no character timestamps are fabricated. Existing `[pause=1s]` markers are inserted and validated after alignment.
+
+Long recordings can produce zero-duration Whisper word boundaries despite exact text coverage. The CLI automatically refines those sections with the CPU `WAV2VEC2_ASR_BASE_960H` acoustic aligner, downloading its weights once when needed. Refinement uses actual audio frames in context windows and validates the full original word sequence again; it does not interpolate timing or regenerate speech. Narration, numerals, and original character offsets remain unchanged. The optional extra pins matching Torch and torchaudio 2.8 releases because this acoustic alignment API is unavailable in torchaudio 2.9. `doctor` checks that the required alignment API is installed without loading refinement weights. If refinement still cannot produce valid timing, the job stops with the specific alignment reason and keeps completed speech. Alignment adapter version 2 refreshes alignment checkpoints while reusing valid speech chunks and assembly.
+
+Run and resume commands stay the same:
+
+```powershell
+& .\.venv\Scripts\python.exe -m video_automation run --script .\narration.txt
+# Generate the scene images elsewhere and copy them into the reported directory.
+& .\.venv\Scripts\python.exe -m video_automation resume JOB_ID
+```
+
+The only per-video handoff is copying scene images and resuming. Audio generation, alignment, subtitles, and rendering run automatically. Chunk, assembly, alignment, and pause checkpoints are independent: retrying alignment does not regenerate speech, and a valid cached resume does not require VoiceStudio to be open. Use `resume JOB_ID --retry-failed` if a stage has exhausted its bounded attempts. `request_timeout_seconds` also controls each local speech request.
+
+New jobs save nonsecret speech settings in their manifest and reuse them on resume. VoiceStudio settings contribute to default job identity. Changing the provider or settings requires a new job; reusing an explicit job ID with different speech settings is rejected. Historical jobs without saved speech settings retain ElevenLabs behavior even if the global configuration now selects VoiceStudio. Loading those jobs does not rewrite their manifests. `status` remains read-only.
+
+`doctor` reports executable, API, voice, alignment dependency, and cached-model readiness without launching VoiceStudio, downloading weights, or generating speech. Before the first alignment, an uncached model is reported as not ready; an actual run downloads it. A stopped app is also reported as unavailable even when automatic startup is configured. The earlier ElevenLabs setup instructions and single-request character-alignment behavior apply only to ElevenLabs speech.
 
 ## External images and API images
 
@@ -66,7 +112,7 @@ python -m video_automation run .\narration.txt
 python -m video_automation run --script .\narration.txt
 ```
 
-Script mode skips research, drafting, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. Explicit pause markers are separated from the spoken text as described below; all other narration text is preserved. Empty normalized narration stops before generation requests. There is no project-level narration-length requirement or automatic length revision in either input mode. The spoken text is sent unchanged to ElevenLabs, subject to the selected speech model's request limit. Exact character alignment, timed transcripts, visual planning, image preparation, rendering, and validation still run. The text provider is still required for metadata and visual planning.
+Script mode skips research, drafting, and source auditing. You are responsible for reviewing the supplied narration. The file is normalized by converting CRLF/CR to LF and trimming outer whitespace. Explicit pause markers are separated from the spoken text as described below; all other narration text is preserved. Empty normalized narration stops before generation requests. There is no project-level narration-length requirement or automatic length revision in either input mode. The spoken text is sent unchanged to the selected speech provider, subject to its request limit. Verified speech alignment, timed transcripts, visual planning, image preparation, rendering, and validation still run. The text provider is still required for metadata and visual planning.
 
 Each script job stores an `input_script.txt` snapshot and its hash. `resume JOB_ID` reads that snapshot, so moving, editing, or deleting the original file does not change an existing job. Running a changed script creates a different default job. Reusing an explicit `--job-id` with different content or a different mode is rejected. If the saved snapshot is missing or corrupt, rerun with the original narration file and the same job ID to restore it. Input-file paths resolve against the working directory.
 
@@ -96,7 +142,7 @@ python -m video_automation run .\narration.txt
 
 Markers must use the exact lowercase syntax and be separated from words and other markers by whitespace. Each duration must be positive, at most 60 seconds, and long enough to represent at least one sample at 48 kHz. Markers can appear before the first word, between words, or after the final word. Consecutive markers add their durations. Invalid markers and files containing only pause markers fail before job creation or provider requests.
 
-The original normalized input, including markers, stays in `input_script.txt`. `script.txt`, metadata, thumbnail planning, speech, subtitles, and visual prompts use only the spoken narration. The pipeline makes the usual single speech request, verifies its original character alignment, and inserts zero-valued PCM samples locally. The requested duration is rounded to the nearest audio sample and adds to any natural pause already present in the generated voice. Background music can continue during voice silence.
+The original normalized input, including markers, stays in `input_script.txt`. `script.txt`, metadata, thumbnail planning, speech, subtitles, and visual prompts use only the spoken narration. The pipeline generates speech, verifies the provider character alignment or VoiceStudio forced word alignment, and inserts zero-valued PCM samples locally. The requested duration is rounded to the nearest audio sample and adds to any natural pause already present in the generated voice. Background music can continue during voice silence.
 
 Word and sentence timestamps shift after each insertion. Cues split at pauses so captions do not span the inserted silence, and the preceding scene remains visible until the next cue starts. Leading silence displays the first scene, while trailing silence extends the last scene. `alignment.json` records the exact inserted sample ranges and adjusted timestamps. Validation checks these ranges against the saved input, original provider alignment, and silent audio samples; intentional pauses can exceed the usual long-silence threshold without allowing unrelated long silences.
 
@@ -244,7 +290,9 @@ python -m video_automation validate video_native_text_JOB_HASH
 
 Temporary HTTP failures, transport errors, missing image responses, and invalid images receive bounded exponential-backoff retries. Authentication, unsupported content, failed source audits, and invalid narration fail clearly. The retry counter persists across restarts. `--retry-failed` explicitly starts one new bounded batch for failed or interrupted stages; successful stages remain cached. An interrupted request can still be billable if the provider completed it before the client lost the response.
 
-Visual batches must contain every requested cue ID exactly once in order, with valid scene descriptions, character IDs, and motion settings. The requested output schema constrains the cue count and allowed IDs for each batch. Malformed visual output is rejected before a checkpoint is marked completed and receives the existing bounded retries. Visual responses with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"` also receive those retries, and the error reports the token-limit reason. Partial output is never approved. Refusals and other incomplete-response reasons still stop immediately. Cached batches from older runs are revalidated before reuse. Invalid cached batches are retried within their remaining attempt budget, while valid earlier batches and completed speech remain cached. Later batches are regenerated when their continuity inputs change. Raw provider responses remain available for diagnosis.
+Visual batches must contain every requested cue ID exactly once in order, with valid scene descriptions, character IDs, and motion settings. The provider response schema requires an object with one named field per requested cue ID, rather than an array of model-generated IDs. The adapter validates every field and restores the requested order before saving the canonical cue array. Missing or unexpected fields and duplicate JSON keys are rejected. Errors for invalid canonical arrays identify missing, duplicate, or unexpected IDs; receiving 24 records does not prove coverage of 24 different cues.
+
+Malformed visual output is rejected before a checkpoint is marked completed and receives bounded retries. Visual responses with `status: "incomplete"` and `incomplete_details.reason: "max_output_tokens"` also receive those retries, and the error reports the token-limit reason. Partial output is never approved. Refusals and other incomplete-response reasons still stop immediately. Response-format version 2 applies to new or regenerated batches. Valid historical canonical batches remain reusable when their original inputs and output hashes match. Failed or invalid legacy batches receive versioned inputs and a fresh bounded generation batch for the changed protocol; subsequent resumes preserve those attempts, with `--retry-failed` required after exhaustion. Later batches regenerate when their continuity inputs change. Completed speech and raw provider responses remain preserved.
 
 The recorded character count uses Python Unicode characters after CRLF/CR normalization and outer whitespace trimming. Only `script.txt` is counted and spoken; explicit script pause markers remain in the input snapshot and are not counted as narration. Narration must be nonempty; no character-range gate or automatic length revision applies. Final validation retains the historical `narration_length` report key to check nonempty text, normalization, and the recorded character count, with `enforced: false` indicating that length bounds are disabled. Original ElevenLabs alignment must match the exact narration in both modes. A mismatch fails clearly rather than inventing timestamps. Explicit pauses shift verified timestamps by their inserted sample counts before timing is frozen after audio decoding; later speech changes require regeneration and alignment.
 

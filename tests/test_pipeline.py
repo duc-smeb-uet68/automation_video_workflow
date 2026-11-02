@@ -893,15 +893,15 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
     calls, recovered = [], [False]
     def handler(request):
         payload = json.loads(request.content)
-        ids = payload["text"]["format"]["schema"]["properties"]["cues"]["items"]["properties"]["id"]["enum"]
+        ids = payload["text"]["format"]["schema"]["properties"]["cues"]["required"]
         calls.append(ids[0])
         if ids[0] == "cue_0025" and not recovered[0]:
             if not exhaust:
                 recovered[0] = True
             return httpx.Response(200, json={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
                 "output": [{"type": "message", "content": [{"type": "output_text", "text": '{"cues": [\n' + ' '*100}]}]})
-        plan = {"cues": [{"id": value, "scene_group": "camp", "character_ids": [],
-                         "scene_description": "A campfire.", "motion": "hold"} for value in ids]}
+        plan = {"cues": {value: {"scene_group": "camp", "character_ids": [],
+                         "scene_description": "A campfire.", "motion": "hold"} for value in ids}}
         return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
             "content": [{"type": "output_text", "text": json.dumps(plan)}]}]})
     original_client = httpx.Client
@@ -933,7 +933,8 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
     assert len(resumed.manifest.usage) == len(calls)
 
 
-def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store):
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store, exhausted):
     from video_automation.providers import STYLE, VISUAL_PROMPT
     words = visual_words(store)
     cues = segment_words(words, store.config.fps, store.manifest.audio_duration)
@@ -952,6 +953,10 @@ def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store):
                            "previous_scenes": previous_scenes, "text_generation": store.config.text_cache_settings,
                            "style": STYLE, "prompt": VISUAL_PROMPT}, f"visuals/batch_{offset//24:03}.json", lambda: planned)
         records.extend(planned["cues"])
+    if exhausted:
+        store.manifest.stages["visuals.001"].status = "failed"
+        store.manifest.stages["visuals.001"].attempts = store.config.max_attempts
+        store.save()
     atomic_bytes(store.path("audio/narration.wav"), b"completed narration")
     atomic_bytes(store.path("alignment.json"), b"completed alignment")
     atomic_bytes(store.path("responses/visuals_bad.json"), b"preserved provider response")
@@ -968,7 +973,7 @@ def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store):
     resumed.visuals(words)
     assert requested == ["cue_0025", "cue_0049"]
     assert resumed.store.manifest.stages["visuals.000"].attempts == 1
-    assert resumed.store.manifest.stages["visuals.001"].attempts == 2
+    assert resumed.store.manifest.stages["visuals.001"].attempts == 1
     assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
     assert [c.id for c in resumed.store.manifest.cues] == [c.id for c in cues]
     resumed.visuals(words)

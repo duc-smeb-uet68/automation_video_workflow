@@ -379,6 +379,11 @@ def visual_plan(visual_cues):
                      for cue in visual_cues]}
 
 
+def keyed_visual_plan(plan):
+    return {"cues": {record["id"]: {key: value for key, value in record.items() if key != "id"}
+                     for record in plan["cues"]}}
+
+
 @pytest.mark.parametrize("provider,key", [("openrouter", "OPENROUTER_API_KEY"), ("openai", "OPENAI_API_KEY")])
 def test_visual_request_schema_constrains_batch_without_mutating_shared_schema(store, monkeypatch, visual_cues, visual_plan, provider, key):
     store.config.text_provider = provider
@@ -388,16 +393,18 @@ def test_visual_request_schema_constrains_batch_without_mutating_shared_schema(s
     requests = []
     def post(operation, url, headers, payload):
         requests.append(payload)
-        return response(visual_plan)
+        return response(keyed_visual_plan(visual_plan))
     monkeypatch.setattr(client, "post", post)
     assert client.visuals(visual_cues) == visual_plan
     schema = requests[0]["text"]["format"]["schema"]["properties"]["cues"]
-    assert schema["minItems"] == schema["maxItems"] == 2
-    assert schema["items"]["properties"]["id"]["enum"] == ["cue_0025", "cue_0026"]
-    assert "enum" not in schema["items"]["properties"]["scene_description"]
-    assert "enum" not in schema["items"]["properties"]["character_ids"]["items"]
-    assert "overlay_text" not in schema["items"]["properties"]
-    assert "overlay_path" not in schema["items"]["properties"]
+    assert schema["type"] == "object" and schema["additionalProperties"] is False
+    assert schema["required"] == list(schema["properties"]) == ["cue_0025", "cue_0026"]
+    for scene in schema["properties"].values():
+        assert "id" not in scene["properties"]
+        assert "enum" not in scene["properties"]["scene_description"]
+        assert "enum" not in scene["properties"]["character_ids"]["items"]
+        assert "overlay_text" not in scene["properties"]
+        assert "overlay_path" not in scene["properties"]
     assert json.dumps(VISUAL_SCHEMA, sort_keys=True) == before
 
 
@@ -408,12 +415,12 @@ def test_visual_planner_accepts_narration_specific_characters(store, monkeypatch
     visual_plan["cues"][0]["character_ids"] = ["astronaut", "scientist"]
     visual_plan["cues"][1]["character_ids"] = []
     client = Providers(store)
-    monkeypatch.setattr(client, "post", lambda *args: response(visual_plan))
+    monkeypatch.setattr(client, "post", lambda *args: response(keyed_visual_plan(visual_plan)))
     assert client.visuals(visual_cues) == visual_plan
     assert visual_cues[0].character_ids == []
 
 
-@pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "reordered", "character", "blank", "json", "overlay"])
+@pytest.mark.parametrize("invalid", ["count", "id", "duplicate", "character", "blank", "json", "overlay"])
 def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_cues, visual_plan, invalid):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
     if invalid == "count":
@@ -422,15 +429,13 @@ def test_invalid_visual_provider_output_is_retryable(store, monkeypatch, visual_
         visual_plan["cues"][0]["id"] = "..."
     elif invalid == "duplicate":
         visual_plan["cues"][1]["id"] = "cue_0025"
-    elif invalid == "reordered":
-        visual_plan["cues"].reverse()
     elif invalid == "character":
         visual_plan["cues"][0]["character_ids"] = [" "]
     elif invalid == "blank":
         visual_plan["cues"][0]["scene_group"] = " "
     elif invalid == "overlay":
         visual_plan["cues"][0]["overlay_text"] = "38%"
-    output = response(visual_plan)
+    output = response(keyed_visual_plan(visual_plan))
     if invalid == "json":
         output["output"][0]["content"][0]["text"] = "not JSON"
     client = Providers(store)
@@ -449,7 +454,7 @@ def test_visual_planner_requests_optional_native_text_and_image_chosen_placement
     client = Providers(store)
     def post(operation, url, headers, payload):
         requests.append(payload)
-        return response(visual_plan)
+        return response(keyed_visual_plan(visual_plan))
     monkeypatch.setattr(client, "post", post)
     result = client.visuals(visual_cues)
     assert result == visual_plan
@@ -474,3 +479,35 @@ def test_visual_refusal_remains_non_retryable(store, monkeypatch, visual_cues):
     with pytest.raises(PipelineError, match="refused") as error:
         client.visuals(visual_cues)
     assert not isinstance(error.value, TemporaryError)
+
+
+def test_keyed_visual_response_restores_requested_order_without_relabeling(store, monkeypatch, visual_cues, visual_plan):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    visual_plan["cues"][0]["scene_description"] = "First cue scene."
+    visual_plan["cues"][1]["scene_description"] = "Second cue scene."
+    wire = keyed_visual_plan(visual_plan)
+    wire["cues"] = dict(reversed(list(wire["cues"].items())))
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: response(wire))
+    assert client.visuals(visual_cues) == visual_plan
+
+
+def test_duplicate_visual_json_keys_are_retryable(store, monkeypatch, visual_cues, visual_plan):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
+    scene = json.dumps(keyed_visual_plan(visual_plan)["cues"]["cue_0025"])
+    output = response({})
+    output["output"][0]["content"][0]["text"] = ('{"cues":{"cue_0025":' + scene +
+        ',"cue_0025":' + scene + ',"cue_0026":' + scene + '}}')
+    client = Providers(store)
+    monkeypatch.setattr(client, "post", lambda *args: output)
+    with pytest.raises(TemporaryError, match="invalid structured output"):
+        client.visuals(visual_cues)
+
+
+def test_visual_id_error_identifies_missing_and_duplicate_cues(visual_cues, visual_plan):
+    from video_automation.providers import validate_visual_plan
+    visual_plan["cues"][1]["id"] = "cue_0025"
+    with pytest.raises(TemporaryError) as error:
+        validate_visual_plan(visual_cues, visual_plan)
+    assert "missing IDs: cue_0026" in str(error.value)
+    assert "duplicate IDs: cue_0025" in str(error.value)

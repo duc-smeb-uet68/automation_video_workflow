@@ -60,6 +60,26 @@ def make_script(text: str, references=()) -> Script:
 
 
 def aligned_words(script: Script, alignment: dict, duration: float) -> list[Word]:
+    if alignment.get("format") == "word_alignment_v1":
+        if alignment.get("narration") != script.narration:
+            raise PipelineError("Speech alignment does not match the exact normalized narration; realignment is required")
+        try:
+            words = [Word.model_validate(word) for word in alignment["words"]]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise PipelineError("Invalid word alignment records") from exc
+        matches = list(re.finditer(r"\S+", script.narration))
+        if not words or len(matches) != len(words):
+            raise PipelineError("Word alignment does not cover every narration word")
+        for match, word in zip(matches, words):
+            sentence = next((s for s in script.sentences if s.char_start <= match.start() < s.char_end), None)
+            if (word.text != match.group() or (word.char_start, word.char_end) != match.span()
+                    or sentence is None or word.sentence_id != sentence.id):
+                raise PipelineError("Word alignment text or offsets differ from original narration")
+            if word.end <= word.start or word.end > duration + 0.00001:
+                raise PipelineError("Word alignment has zero-duration or out-of-bounds timestamps")
+        if any(a.end > b.start + 0.00001 for a, b in zip(words, words[1:])):
+            raise PipelineError("Word alignment has unordered or overlapping timestamps")
+        return words
     characters = alignment.get("characters", [])
     starts = alignment.get("character_start_times_seconds", [])
     ends = alignment.get("character_end_times_seconds", [])
@@ -87,8 +107,10 @@ def pause_timing(script: Script, alignment: dict, source_frames: int,
     """Offset verified provider timestamps by the exact inserted sample counts."""
     duration = source_frames / SPEECH_SAMPLE_RATE
     words = aligned_words(script, alignment, duration)
-    starts = list(alignment["character_start_times_seconds"])
-    ends = list(alignment["character_end_times_seconds"])
+    word_format = alignment.get("format") == "word_alignment_v1"
+    starts = [] if word_format else list(alignment["character_start_times_seconds"])
+    ends = [] if word_format else list(alignment["character_end_times_seconds"])
+    shifted_words = [w.model_copy() for w in words]
     insertions, added_frames, previous_index = [], 0, 0
     for pause in pauses:
         index = pause.word_index
@@ -110,12 +132,16 @@ def pause_timing(script: Script, alignment: dict, source_frames: int,
         insertions.append({"word_index": index, "source_frame": source_frame, "frames": frames,
                            "start": start, "end": (source_frame + added_frames + frames) / SPEECH_SAMPLE_RATE})
         shift = frames / SPEECH_SAMPLE_RATE
+        for word in shifted_words[index:]:
+            word.start += shift
+            word.end += shift
         for char_index in range(char_offset, len(starts)):
             starts[char_index] += shift
             ends[char_index] += shift
         added_frames += frames
         previous_index = index
-    shifted = {**alignment, "character_start_times_seconds": starts, "character_end_times_seconds": ends}
+    shifted = ({**alignment, "words": [w.model_dump() for w in shifted_words]} if word_format else
+               {**alignment, "character_start_times_seconds": starts, "character_end_times_seconds": ends})
     aligned_words(script, shifted, (source_frames + added_frames) / SPEECH_SAMPLE_RATE)
     return shifted, insertions
 

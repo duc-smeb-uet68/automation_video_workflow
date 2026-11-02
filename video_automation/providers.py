@@ -118,6 +118,10 @@ AUDIT_SCHEMA = object_schema({"sentences": {"type": "array", "items": object_sch
 VISUAL_SCHEMA = object_schema({"cues": {"type": "array", "items": object_schema({
     "id": STRING, "scene_group": STRING, "character_ids": STRINGS, "scene_description": STRING,
     "motion": {"type": "string", "enum": ["hold", "slow_push"]}})}})
+VISUAL_RESPONSE_VERSION = 2
+VISUAL_RESPONSE_PROMPT = ("Return cues as a JSON object keyed by the exact requested cue IDs, not an array. "
+                          "Every requested key is required exactly once. Each value contains scene_group, "
+                          "character_ids, scene_description, and motion only; do not generate an id field.")
 
 
 def gemini_keys() -> list[str]:
@@ -175,8 +179,15 @@ def validate_visual_plan(cues, plan):
     expected = [cue.id for cue in cues]
     actual = [record["id"] for record in plan["cues"]]
     if actual != expected:
+        missing = [value for value in expected if value not in actual]
+        duplicate = list(dict.fromkeys(value for value in actual if actual.count(value) > 1))
+        unexpected = list(dict.fromkeys(value for value in actual if value not in expected))
+        details = [f"{label}: {', '.join(values[:5])}" for label, values in (
+            ("missing IDs", missing), ("duplicate IDs", duplicate), ("unexpected IDs", unexpected)) if values]
+        if not details:
+            details.append("IDs are out of order")
         raise TemporaryError("Visual plan must cover every cue ID exactly once in order "
-                             f"(expected {len(expected)} cues; received {len(actual)})")
+                             f"(expected {len(expected)} cues; received {len(actual)}; {'; '.join(details)})")
     for record in plan["cues"]:
         if not record["scene_group"].strip() or not record["scene_description"].strip():
             raise TemporaryError(f"Empty visual description or scene group: {record['id']}")
@@ -324,7 +335,14 @@ class Providers:
             raise PipelineError(message)
         output = "".join(part.get("text", "") for part in parts if part.get("type") == "output_text")
         try:
-            result = json.loads(output)
+            def unique_object(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise json.JSONDecodeError("Duplicate object key", "", 0)
+                    result[key] = value
+                return result
+            result = json.loads(output, object_pairs_hook=unique_object) if operation == "visuals" else json.loads(output)
         except ValueError as exc:
             if openrouter and research and output.strip():
                 sources = self._research_sources(data)
@@ -496,17 +514,17 @@ class Providers:
         raise TemporaryError("Image provider returned no image (possibly blocked); retry limit applies")
 
     def visuals(self, cues, previous_scenes=None) -> dict:
-        prompt = (VISUAL_PROMPT + "\n"
+        prompt = (VISUAL_PROMPT + "\n" + VISUAL_RESPONSE_PROMPT + "\n"
                   + "Previous scenes for continuity: " + json.dumps(previous_scenes or []) + "\n"
                   + json.dumps([{"id": c.id, "text": c.text} for c in cues]))
-        schema = deepcopy(VISUAL_SCHEMA)
-        array = schema["properties"]["cues"]
-        array.update(minItems=len(cues), maxItems=len(cues))
-        properties = array["items"]["properties"]
-        properties["id"] = {"type": "string", "enum": [cue.id for cue in cues]}
+        scene = deepcopy(VISUAL_SCHEMA["properties"]["cues"]["items"])
+        properties = scene["properties"]
+        del properties["id"]
+        scene["required"].remove("id")
         properties["character_ids"] = {"type": "array", "items": {"type": "string", "minLength": 1}}
         for field in ("scene_group", "scene_description"):
             properties[field] = {"type": "string", "minLength": 1}
+        schema = object_schema({"cues": object_schema({cue.id: scene for cue in cues})})
         try:
             result, _ = self.structured("visuals", prompt, schema)
         except PipelineError as exc:
@@ -514,5 +532,6 @@ class Providers:
             if isinstance(exc.__cause__, (json.JSONDecodeError, ValidationError)):
                 raise TemporaryError(str(exc)) from exc
             raise
-        validate_visual_plan(cues, result)
-        return result
+        planned = {"cues": [{"id": cue.id, **result["cues"][cue.id]} for cue in cues]}
+        validate_visual_plan(cues, planned)
+        return planned

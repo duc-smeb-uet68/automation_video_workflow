@@ -18,7 +18,7 @@ def load_credentials(path):
     """Read only provider keys from an optional local .env; never print values."""
     if not path.is_file():
         return
-    allowed = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY"}
+    allowed = {"OPENROUTER_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY", "GEMINI_API_KEY", "VOICESTUDIO_API_KEY"}
     for line in path.read_text(encoding="utf-8-sig").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -54,10 +54,24 @@ def doctor(config):
             checks[name] = False
     for name in config.generation_keys:
         checks[name] = bool(gemini_keys()) if name == "GEMINI_API_KEY" else bool(os.environ.get(name))
-    checks["voice_id"] = bool(config.voice_id)
+    if config.speech_provider == "elevenlabs":
+        checks["voice_id"] = bool(config.voice_id)
+    else:
+        from .speech import VoiceStudio, alignment_readiness
+        checks["voicestudio_executable"] = (not config.voicestudio_auto_launch or
+                                              bool(config.voicestudio_executable and config.voicestudio_executable.is_file()))
+        alignment = alignment_readiness()
+        checks["alignment_dependency"] = alignment["dependency"]
+        checks["alignment_model_cached"] = alignment["model_cached"]
+        try:
+            checks["voicestudio_api_and_voice"] = VoiceStudio(config, config.speech_snapshot).inspect()
+        except PipelineError as exc:
+            checks["voicestudio_api_and_voice"] = False
+            print(f"VoiceStudio: {exc}", file=sys.stderr)
     checks["music_file"] = not config.music_path or config.music_path.is_file()
     print(json.dumps({"ready_for_live_generation": all(checks.values()),
                       "text_provider": config.text_provider, "text_model": config.text_model,
+                      "speech_provider": config.speech_provider,
                       "image_mode": config.image_mode,
                       "image_provider": config.image_provider if config.image_mode == "api" else None,
                       "image_model": config.image_model if config.image_mode == "api" else None,
@@ -139,9 +153,9 @@ def main(argv=None):
                 else:
                     pipeline = Pipeline.create(config, args.input, args.job_id, thumbnail_enabled=args.thumbnail)
                 if not pipeline.store.manifest.stages:
-                    missing = [name for name in config.generation_keys
+                    missing = [name for name in pipeline.config.generation_keys
                                if not (gemini_keys() if name == "GEMINI_API_KEY" else os.environ.get(name))]
-                    if not config.voice_id:
+                    if pipeline.config.speech_provider == "elevenlabs" and not pipeline.config.voice_id:
                         missing.append("voice_id in configuration")
                     if missing:
                         error = "Live generation requires setup: " + ", ".join(missing) + ". Run doctor after configuring locally."
