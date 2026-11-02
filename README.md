@@ -103,6 +103,21 @@ python -m video_automation doctor --image-mode api
 
 Image mode is saved in each manifest. Resume uses the saved mode unless explicitly overridden. Default job identities distinguish external-image jobs from API-image jobs for the same input, preserving older API job IDs. Reusing an explicit job ID with a different image mode is rejected; use the explicit resume override to change it.
 
+## Codex image workflow
+
+The project skill at [`.agents/skills/video-workflow/SKILL.md`](.agents/skills/video-workflow/SKILL.md) coordinates external-image jobs from Codex. Invoke it in a chat opened in this repository:
+
+```text
+$video-workflow Create a video from narration.txt.
+$video-workflow Resume JOB_ID and generate its missing scene images.
+```
+
+The skill runs preparation in external-image mode, reads the saved prompts, generates missing scenes with Codex's built-in image tool, saves the required cue filenames, and resumes rendering and validation. It preserves valid images and checkpoints. Enabled thumbnails use the same image tool and do not block video completion. Switching an existing API-image job requires an explicit instruction.
+
+Built-in image generation counts toward Codex usage limits and does not require an OpenAI API key. Text planning and speech retain their configured providers and possible charges; the Python spending ledger does not track Codex image usage. If the built-in image tool is unavailable or fails, the skill preserves progress and reports the remaining files without switching to an image API. This is a workflow driven by Codex chat, not an unattended Python image-provider integration.
+
+If the new skill is not listed, start a new chat in this project. You can also ask Codex to read the skill file directly. Installing the skill does not start generation.
+
 ## Input modes
 
 Save the final narration as a UTF-8 plain text file, with or without a BOM. Both commands select script mode with the default configuration:
