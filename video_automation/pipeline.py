@@ -31,6 +31,8 @@ class Pipeline:
     def __init__(self, store: Store, providers=None):
         self.store = store
         self.config = store.config
+        if store.manifest.mode in {"script", "production"}:
+            self.config = store.config = store.config.with_speech(store.manifest.speech_settings)
         self.providers = providers or Providers(store)
 
     @classmethod
@@ -51,12 +53,19 @@ class Pipeline:
         identity = {"mode": mode, "narration": script_input} if script is not None else topic
         if config.image_mode == "external":
             identity = {"input": identity, "image_mode": "external"}
+        speech_settings = config.speech_snapshot
+        if speech_settings.provider == "voicestudio":
+            identity = {"input": identity, "speech": speech_settings.model_dump(mode="json")}
         job_id = job_id or "video_native_text_" + digest(identity)[:12]
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", job_id):
             raise PipelineError("Job ID must contain only letters, digits, underscores and hyphens")
         folder = config.jobs_dir / job_id
         if (folder / "manifest.json").is_file():
             store = Store(folder, config)
+            saved_speech = store.manifest.speech_settings
+            if ((saved_speech.provider if saved_speech else "elevenlabs") != speech_settings.provider
+                    or (saved_speech is not None and saved_speech != speech_settings)):
+                raise PipelineError("Existing job has different speech settings; choose another job ID. Resume uses saved speech settings.")
             if (store.manifest.mode != mode
                     or store.manifest.image_mode != config.image_mode
                     or (script is None and store.manifest.topic != topic)
@@ -71,6 +80,7 @@ class Pipeline:
         else:
             store = Store(folder, config, Manifest(job_id=job_id, topic=topic, mode=mode,
                                                   image_strategy="native_text", image_mode=config.image_mode,
+                                                  speech_settings=speech_settings,
                                                   thumbnail_enabled=thumbnail_enabled is not False,
                                                   script_input_hash=script_input_hash, script_pauses=pauses, fps=config.fps))
         if script is not None:
@@ -209,6 +219,9 @@ class Pipeline:
         # Repeat the invariant at the provider boundary, including resumed jobs.
         if not script.narration or script.narration != normalize(script.narration):
             raise PipelineError("Speech blocked: narration must be nonempty and normalized")
+        if self.config.speech_provider == "voicestudio":
+            from .speech import voicestudio_speech
+            return voicestudio_speech(store, script)
         speech = self.json_task("speech.request", {"text": script.narration, "model": self.config.elevenlabs_model,
                                 "voice": self.config.voice_id, "settings": self.config.voice_settings},
                                 "audio/speech_response.json", lambda: self.providers.speech(script.narration))

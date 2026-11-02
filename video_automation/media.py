@@ -243,10 +243,12 @@ def validate_pauses(store, script_text: str, alignment: dict) -> list[dict]:
             raise PipelineError("Pause validation requires 48 kHz mono PCM16 audio")
         frames = audio.getnframes()
         source_frames = frames - sum(round(p.seconds * SPEECH_SAMPLE_RATE) for p in pauses)
-        original = read_json(store.path("audio/speech_response.json"))["alignment"]
+        word_format = alignment.get("format") == "word_alignment_v1"
+        original = (read_json(store.path("audio/word_alignment.json")) if word_format else
+                    read_json(store.path("audio/speech_response.json"))["alignment"])
         shifted, expected = pause_timing(script, original, source_frames, pauses)
         words = aligned_words(script, shifted, frames / SPEECH_SAMPLE_RATE)
-        if (alignment.get("pauses") != expected or alignment["characters"] != shifted
+        if (alignment.get("pauses") != expected or alignment.get("source_alignment" if word_format else "characters") != shifted
                 or alignment["words"] != [w.model_dump() for w in words]):
             raise PipelineError("Pause timing does not match verified provider alignment")
         for pause in expected:
@@ -304,6 +306,19 @@ def validate(store) -> dict:
         try:
             alignment = json.loads(words_path.read_text(encoding="utf-8"))
             words = alignment["words"]
+            if manifest.speech_settings and manifest.speech_settings.provider == "voicestudio":
+                if alignment.get("format") != "word_alignment_v1":
+                    raise PipelineError("VoiceStudio speech requires verified word alignment")
+                original = read_json(store.path("audio/word_alignment.json"))
+                source = store.path("audio/source.wav")
+                if original["source_audio_sha256"] != file_hash(source):
+                    raise PipelineError("Forced alignment does not match the original VoiceStudio recording")
+                aligned_words(make_script(script_text), original, audio_duration(config, source))
+                verified = aligned_words(make_script(script_text), alignment["source_alignment"], manifest.audio_duration)
+                if words != [w.model_dump() for w in verified]:
+                    raise PipelineError("Final word timing differs from verified alignment")
+                if not manifest.script_pauses and alignment["source_alignment"] != original:
+                    raise PipelineError("Final alignment differs from the original forced alignment")
             if manifest.script_pauses or alignment.get("pauses"):
                 def pause_check():
                     intentional_pauses.extend(validate_pauses(store, script_text, alignment))

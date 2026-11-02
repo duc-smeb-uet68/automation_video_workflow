@@ -4,12 +4,39 @@ import json
 import shutil
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Record(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+
+class SpeechSettings(Record):
+    provider: Literal["elevenlabs", "voicestudio"] = "elevenlabs"
+    model: str
+    voice: str
+    voice_settings: dict = Field(default_factory=dict)
+    base_url: str = "http://127.0.0.1:3900"
+    executable: Path | None = None
+    auto_launch: bool = True
+    language: Literal["en"] = "en"
+    speed: float = Field(default=1.0, ge=0.25, le=4)
+    adapter_version: int = 1
+
+    @model_validator(mode="after")
+    def local_endpoint(self):
+        parsed = urlparse(self.base_url)
+        if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path not in {"", "/"}):
+            raise ValueError("VoiceStudio requires a loopback HTTP base URL without credentials or a path")
+        try:
+            parsed.port
+        except ValueError as exc:
+            raise ValueError("VoiceStudio base URL has an invalid port") from exc
+        return self
 
 
 class Config(Record):
@@ -25,6 +52,14 @@ class Config(Record):
     openrouter_image_model: str = Field(default="google/gemini-3.1-flash-lite-image", min_length=1)
     gemini_model: str = "gemini-3.1-flash-lite-image"
     elevenlabs_model: str = "eleven_multilingual_v2"
+    speech_provider: Literal["elevenlabs", "voicestudio"] = "elevenlabs"
+    voicestudio_base_url: str = "http://127.0.0.1:3900"
+    voicestudio_executable: Path | None = None
+    voicestudio_auto_launch: bool = True
+    voicestudio_model: str = Field(default="omnivoice", min_length=1)
+    voicestudio_voice: str = Field(default="default", min_length=1)
+    voicestudio_language: Literal["en"] = "en"
+    voicestudio_speed: float = Field(default=1.0, ge=0.25, le=4)
     voice_id: str = ""
     voice_settings: dict = Field(default_factory=lambda: {
         "stability": 0.71, "similarity_boost": 0.75, "style": 0.37,
@@ -65,10 +100,32 @@ class Config(Record):
 
     @property
     def generation_keys(self) -> tuple[str, ...]:
-        keys = (self.text_key_env, "ELEVENLABS_API_KEY")
+        keys = (self.text_key_env,)
+        if self.speech_provider == "elevenlabs":
+            keys += ("ELEVENLABS_API_KEY",)
         if self.image_mode == "api":
             keys += (self.image_key_env,)
         return tuple(dict.fromkeys(keys))
+
+    @property
+    def speech_snapshot(self) -> SpeechSettings:
+        if self.speech_provider == "elevenlabs":
+            return SpeechSettings(model=self.elevenlabs_model, voice=self.voice_id, voice_settings=self.voice_settings)
+        return SpeechSettings(provider="voicestudio", model=self.voicestudio_model, voice=self.voicestudio_voice,
+                              base_url=self.voicestudio_base_url.rstrip("/"), executable=self.voicestudio_executable,
+                              auto_launch=self.voicestudio_auto_launch, language=self.voicestudio_language,
+                              speed=self.voicestudio_speed)
+
+    def with_speech(self, saved: SpeechSettings | None):
+        if saved is None:
+            return self.model_copy(update={"speech_provider": "elevenlabs"})
+        if saved.provider == "elevenlabs":
+            return self.model_copy(update={"speech_provider": "elevenlabs", "elevenlabs_model": saved.model,
+                                           "voice_id": saved.voice, "voice_settings": saved.voice_settings})
+        return self.model_copy(update={"speech_provider": "voicestudio", "voicestudio_model": saved.model,
+                                       "voicestudio_voice": saved.voice, "voicestudio_base_url": saved.base_url,
+                                       "voicestudio_executable": saved.executable, "voicestudio_auto_launch": saved.auto_launch,
+                                       "voicestudio_language": saved.language, "voicestudio_speed": saved.speed})
 
     @property
     def text_cache_settings(self) -> dict:
@@ -84,6 +141,7 @@ class Config(Record):
 
     @model_validator(mode="after")
     def frame_shape(self):
+        self.speech_snapshot
         if self.width % 2 or self.height % 2 or abs(self.width / self.height - 16 / 9) > 0.01:
             raise ValueError("Output must have even dimensions and a 16:9 aspect ratio")
         if any(cost < 0 for cost in self.request_cost_caps_usd.values()):
@@ -95,7 +153,7 @@ class Config(Record):
         data = json.loads(path.read_text(encoding="utf-8-sig")) if path else {}
         config = cls.model_validate(data)
         base = path.resolve().parent if path else Path.cwd()
-        for name in ("jobs_dir", "music_path", "character_reference"):
+        for name in ("jobs_dir", "music_path", "character_reference", "voicestudio_executable"):
             value = getattr(config, name)
             if value is not None and not value.is_absolute():
                 setattr(config, name, (base / value).resolve())
@@ -199,6 +257,7 @@ class Manifest(Record):
     image_strategy: Literal["reference", "text_only", "native_text"] = "native_text"
     # Jobs saved before external images existed retain their original API workflow.
     image_mode: Literal["external", "api"] = "api"
+    speech_settings: SpeechSettings | None = None
     # Existing jobs do not acquire new paid thumbnail requests on resume.
     thumbnail_enabled: bool = False
     script_input_hash: str | None = None
