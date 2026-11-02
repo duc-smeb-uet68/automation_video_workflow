@@ -118,6 +118,12 @@ Built-in image generation counts toward Codex usage limits and does not require 
 
 If the new skill is not listed, start a new chat in this project. You can also ask Codex to read the skill file directly. Installing the skill does not start generation.
 
+If Codex reports that only Runway is available, ask it to follow the skill's image-tool discovery instructions first. Built-in ImageGen can be exposed separately from plugins, including as `image_gen__imagegen` through the session's tool wrapper. A skill cannot enable a genuinely missing host tool. A new chat with both skills makes the intended routing explicit:
+
+```text
+$imagegen $video-workflow Create a video from script\missing_hour_on_every_recording.txt.
+```
+
 ## Input modes
 
 Save the final narration as a UTF-8 plain text file, with or without a BOM. Both commands select script mode with the default configuration:

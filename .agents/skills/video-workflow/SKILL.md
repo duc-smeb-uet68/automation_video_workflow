@@ -12,8 +12,24 @@ Use the repository's Python pipeline for narration, metadata, speech, timing, vi
 - Read the repository's `AGENTS.md` and relevant README instructions. Run commands from the repository root. Prefer `.venv/Scripts/python.exe` on Windows; use the project's configured interpreter elsewhere.
 - Accept a narration file, an explicitly requested topic, or an existing job ID/folder/manifest. If the target cannot be determined from the request and context, ask for it before generation. Do not select an arbitrary job or invent narration.
 - Retain the user's configuration, speech provider, optional music, and thumbnail selection. Put any supplied global `--config PATH` before the subcommand in every command. Resolve jobs from CLI output and configuration; do not assume they live under the default `jobs/` path.
-- Check that the built-in image tool is available before starting new preparation that may incur provider charges. Follow the installed `imagegen` skill in built-in mode. Do not use its CLI fallback, OpenAI image APIs, OpenRouter images, Gemini images, or browser automation for this workflow. If the built-in tool is unavailable, stop and explain the missing capability.
+- Complete the image-tool discovery below before starting new preparation that may incur provider charges. Follow the installed `imagegen` skill in built-in mode. Do not use its CLI fallback, OpenAI image APIs, OpenRouter images, Gemini images, Runway, or browser automation for this workflow.
 - Built-in images count toward Codex usage limits and do not need `OPENAI_API_KEY`. Text planning and speech still use the configured providers and may incur charges. The Python spending ledger does not track Codex image usage. Do not promise a free or unlimited run.
+
+## Discover the built-in image tool
+
+Read the installed `imagegen` skill before deciding that generation is unavailable. Check directly exposed tools and any tool registry or deferred-tool discovery provided by the current session. The built-in namespace can be `image_gen.imagegen`; in a `functions.exec` environment its normalized name can be `image_gen__imagegen` on the `tools` object. A visible Runway plugin is not evidence that built-in ImageGen is absent.
+
+When `functions.exec` exposes `ALL_TOOLS` and `tools`, run this metadata-only check there, not in PowerShell or a separate JavaScript runtime:
+
+```javascript
+text(ALL_TOOLS
+  .filter(({ name }) => /image_gen|imagegen/i.test(name))
+  .map(({ name }) => ({ name, callable: typeof tools[name] === "function" })));
+```
+
+If the built-in tool is exposed, use its actual schema and the host's tool-call instructions for the image phase. Tool discovery makes no generation request and does not prove that account access or generation will succeed. If the session uses a different discovery mechanism, use that mechanism instead of assuming these JavaScript globals exist.
+
+Only report the tool as unavailable after checking the surfaces the session actually exposes. Name the checks and missing tool in the report. An installed skill supplies instructions; it cannot enable a tool withheld by the host. If the tool is genuinely absent, stop before paid preparation, suggest a new app chat with both `$imagegen` and `$video-workflow`, and explain that this may clarify routing but does not guarantee tool availability. Do not install an API client or request an API key to repair a missing built-in tool.
 
 ## Prepare or resume the job
 
