@@ -112,7 +112,7 @@ $video-workflow Create a video from narration.txt.
 $video-workflow Resume JOB_ID and generate its missing scene images.
 ```
 
-The skill runs preparation in external-image mode, reads the saved prompts, generates missing scenes with Codex's built-in image tool, saves the required cue filenames, and resumes rendering and validation. It preserves valid images and checkpoints. Enabled thumbnails use the same image tool and do not block video completion. Switching an existing API-image job requires an explicit instruction.
+The skill automatically loads and applies the installed `$imagegen` skill in built-in tool mode; you only need to invoke `$video-workflow`. It runs preparation in external-image mode, reads the saved prompts, generates missing scenes with Codex's built-in image tool, saves the required cue filenames, and resumes rendering and validation. It preserves valid images and checkpoints. Enabled thumbnails use the same image tool and do not block video completion. Switching an existing API-image job requires an explicit instruction.
 
 Built-in image generation counts toward Codex usage limits and does not require an OpenAI API key. Text planning and speech retain their configured providers and possible charges; the Python spending ledger does not track Codex image usage. If the built-in image tool is unavailable or fails, the skill preserves progress and reports the remaining files without switching to an image API. This is a workflow driven by Codex chat, not an unattended Python image-provider integration.
 

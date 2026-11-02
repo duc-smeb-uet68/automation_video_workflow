@@ -7,6 +7,12 @@ description: Create or resume videos in this repository using Codex built-in ima
 
 Use the repository's Python pipeline for narration, metadata, speech, timing, visual planning, rendering, and validation. Use Codex's built-in image generation for the external-image handoff. Run this workflow when the user requests a video, not merely an explanation or skill installation.
 
+## Apply the imagegen skill automatically
+
+Whenever this workflow runs, also apply `$imagegen` in built-in tool mode, even when the user names only `$video-workflow`. Locate the installed `imagegen` entry in the session's skill catalog and read its `SKILL.md` before tool discovery and paid preparation. Do not require the user to mention `$imagegen` separately. Reuse its image generation, inspection, and project-file saving instructions for scene images and enabled thumbnails; keep the workflow's saved prompts and cue filenames.
+
+This is skill composition through instructions, not a shell command or a tool-enabling mechanism. Do not execute `$imagegen` in PowerShell, copy the system skill into the repository, or change its files. If the installed skill cannot be located, report the missing dependency. If the skill is present but the built-in tool is absent, follow the tool-discovery guidance below.
+
 ## Inputs and setup
 
 - Read the repository's `AGENTS.md` and relevant README instructions. Run commands from the repository root. Prefer `.venv/Scripts/python.exe` on Windows; use the project's configured interpreter elsewhere.
