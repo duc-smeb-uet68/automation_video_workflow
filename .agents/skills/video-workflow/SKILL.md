@@ -43,7 +43,9 @@ Run provider commands with the network access required by the configured text an
 
 If preparation fails with `ConnectError` or a DNS error, diagnose connectivity before consuming another generation retry batch. Use a short, unauthenticated, read-only request to the relevant provider's public endpoint; for OpenRouter, `https://openrouter.ai/api/v1/models` is suitable. Do not print credentials or proxy secrets. If the same probe fails in the sandbox but succeeds through approved network access, run subsequent provider commands through that approved mechanism. A successful public probe establishes connectivity only, not authenticated generation access. Do not assume every connection error has the same cause.
 
-When the user has authorized another retry batch, resume the existing job with `--retry-failed` through the approved network mechanism. Reuse that authorization without asking for the same retry again, while respecting any host approval requirement. Continue to the image handoff, built-in Codex image generation, rendering, and final validation. Preserve valid checkpoints and do not reset exhausted attempts repeatedly.
+A user request containing `--retry-failed`, "retry failed stages", or equivalent wording explicitly authorizes one new bounded retry batch for the selected job. Recognize that authorization from the current request or earlier instructions in the same chat. Execute the authorized resume without asking for conversational confirmation again. Submit any required network escalation through the host's approval tool; network approval and retry authorization are separate. Approval for a read-only connectivity probe alone does not authorize paid generation.
+
+For an authorized retry, resume the existing job with `--retry-failed` through the approved network mechanism, then continue to the image handoff, built-in Codex image generation, rendering, and final validation. Preserve valid checkpoints. If that batch exhausts its attempts, stop and report the failure; do not grant another batch without new user direction.
 
 Example recovery request, with `JOB_ID` replaced by the selected job:
 
@@ -74,7 +76,7 @@ For a compatible external-image job, use:
 & .\.venv\Scripts\python.exe -m video_automation resume JOB_ID
 ```
 
-Read the command's exit code and final JSON on stdout; progress is on stderr. `waiting_for_images` with exit code 0 is the expected handoff. A failed preparation must be resolved before generating scenes. Preserve all completed checkpoints. Use `--retry-failed` only when the user authorizes another bounded retry batch; do not repeatedly reset attempts.
+Read the command's exit code and final JSON on stdout; progress is on stderr. `waiting_for_images` with exit code 0 is the expected handoff. A failed preparation must be resolved before generating scenes. Preserve all completed checkpoints. Apply the retry-authorization rules above: an explicit request with `--retry-failed` is already sufficient authorization and requires no second confirmation.
 
 ## Supply the images
 
