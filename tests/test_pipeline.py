@@ -83,7 +83,12 @@ class FakeProviders:
             "characters": list(text), "character_start_times_seconds": [i*scale for i in range(len(text))],
             "character_end_times_seconds": [(i+1)*scale for i in range(len(text))]}}
 
-    def visuals(self, cues, previous_scenes=None):
+    def visual_context(self, narration):
+        self.calls.append("visual_context")
+        return {"summary": "Caregivers watch a child beside a fire.",
+                "characters": [{"id": "parent", "description": "A parent in a blue tunic."}]}
+
+    def visuals(self, cues, previous_scenes=None, context=None):
         self.calls.append("visuals")
         return {"cues": [{"id": c.id, "scene_group": "camp", "character_ids": ["parent"],
                           "scene_description": "Parent beside a fire.", "motion": "hold"} for c in cues]}
@@ -658,8 +663,8 @@ def test_new_cue_schema_rejects_removed_overlay_fields(field):
 def test_native_text_visual_plan_and_images_preserve_planned_wording(store):
     provider = FakeProviders()
     original = provider.visuals
-    def visuals(cues, previous_scenes=None):
-        planned = original(cues, previous_scenes)
+    def visuals(cues, previous_scenes=None, context=None):
+        planned = original(cues, previous_scenes, context)
         planned["cues"][0]["scene_description"] += ' Draw the exact label "38%" within the image in a suitable location.'
         planned["cues"][1]["motion"] = "slow_push"
         return planned
@@ -835,8 +840,8 @@ def visual_words(store, count=200):
 def test_visual_batch_retries_invalid_plan_before_checkpoint(store, invalid):
     provider = FakeProviders()
     original = provider.visuals
-    def visuals(cues, previous_scenes=None):
-        result = original(cues, previous_scenes)
+    def visuals(cues, previous_scenes=None, context=None):
+        result = original(cues, previous_scenes, context)
         if provider.calls.count("visuals") == 1:
             if invalid == "missing":
                 result["cues"].pop()
@@ -858,15 +863,15 @@ def test_visual_batch_retries_invalid_plan_before_checkpoint(store, invalid):
     Pipeline(store, provider).visuals(words)
     stage = store.manifest.stages["visuals.000"]
     assert stage.status == "completed" and stage.attempts == 2
-    assert provider.calls == ["visuals", "visuals"]
+    assert provider.calls == ["visual_context", "visuals", "visuals"]
     assert [c["id"] for c in read_json(store.path("transcript.json"))] == ["cue_0001", "cue_0002"]
 
 
 def test_invalid_visual_plan_exhausts_retries_without_completed_checkpoint(store):
     provider = FakeProviders()
     original = provider.visuals
-    def visuals(cues, previous_scenes=None):
-        result = original(cues, previous_scenes)
+    def visuals(cues, previous_scenes=None, context=None):
+        result = original(cues, previous_scenes, context)
         result["cues"] = result["cues"][:1]
         result["cues"][0]["id"] = "..."
         return result
@@ -880,7 +885,7 @@ def test_invalid_visual_plan_exhausts_retries_without_completed_checkpoint(store
     assert not store.path("transcript.json").exists()
     with pytest.raises(PipelineError, match="retry limit reached"):
         Pipeline(Store(store.folder, store.config), provider).visuals(words)
-    assert provider.calls == ["visuals"] * store.config.max_attempts
+    assert provider.calls == ["visual_context"] + ["visuals"] * store.config.max_attempts
 
 
 @pytest.mark.parametrize("exhaust", [False, True])
@@ -893,6 +898,9 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
     calls, recovered = [], [False]
     def handler(request):
         payload = json.loads(request.content)
+        if "summary" in payload["text"]["format"]["schema"]["properties"]:
+            return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
+                "content": [{"type": "output_text", "text": json.dumps({"summary": "A campfire.", "characters": []})}]}]})
         ids = payload["text"]["format"]["schema"]["properties"]["cues"]["required"]
         calls.append(ids[0])
         if ids[0] == "cue_0025" and not recovered[0]:
@@ -928,13 +936,13 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
         assert resumed.manifest.stages["visuals.001"].attempts == 2
     assert resumed.manifest.stages["visuals.000"].attempts == 1
     assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
-    assert len(resumed.manifest.usage) == len(calls)
+    assert len(resumed.manifest.usage) == len(calls) + 1
     Pipeline(resumed).visuals(words)
-    assert len(resumed.manifest.usage) == len(calls)
+    assert len(resumed.manifest.usage) == len(calls) + 1
 
 
 @pytest.mark.parametrize("exhausted", [False, True])
-def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store, exhausted):
+def test_shared_context_invalidates_legacy_visual_cache_and_keeps_speech(store, exhausted):
     from video_automation.providers import STYLE, VISUAL_PROMPT
     words = visual_words(store)
     cues = segment_words(words, store.config.fps, store.manifest.audio_duration)
@@ -965,16 +973,16 @@ def test_resume_rejects_old_invalid_visual_cache_and_keeps_valid_work(store, exh
     provider = FakeProviders()
     requested = []
     original = provider.visuals
-    def visuals(batch, previous_scenes=None):
+    def visuals(batch, previous_scenes=None, context=None):
         requested.append(batch[0].id)
-        return original(batch, previous_scenes)
+        return original(batch, previous_scenes, context)
     provider.visuals = visuals
     resumed = Pipeline(Store(store.folder, store.config), provider)
     resumed.visuals(words)
-    assert requested == ["cue_0025", "cue_0049"]
+    assert requested == ["cue_0001", "cue_0025", "cue_0049"]
     assert resumed.store.manifest.stages["visuals.000"].attempts == 1
     assert resumed.store.manifest.stages["visuals.001"].attempts == 1
     assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
     assert [c.id for c in resumed.store.manifest.cues] == [c.id for c in cues]
     resumed.visuals(words)
-    assert requested == ["cue_0025", "cue_0049"]
+    assert requested == ["cue_0001", "cue_0025", "cue_0049"]

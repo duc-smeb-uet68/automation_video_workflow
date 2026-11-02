@@ -14,8 +14,9 @@ from . import media
 from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
 from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
-                        STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION,
-                        Providers, thumbnail_prompt, validate_metadata, validate_thumbnail, validate_visual_plan)
+                        STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_CONTEXT_PROMPT,
+                        VISUAL_CONTEXT_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION, Providers, thumbnail_prompt,
+                        validate_metadata, validate_thumbnail, validate_visual_context, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
 
@@ -268,37 +269,33 @@ class Pipeline:
         from .models import Word
         return [Word.model_validate(w) for w in read_json(store.path("alignment.json"))["words"]]
 
-    def visuals(self, words):
+    def visual_context(self, narration):
+        return self.json_task("visual.context", {"narration": narration,
+                              "text_generation": self.config.text_cache_settings, "style": STYLE,
+                              "prompt": VISUAL_CONTEXT_PROMPT, "schema": VISUAL_CONTEXT_SCHEMA},
+                              "visual_context.json", lambda: self.providers.visual_context(narration),
+                              validate=validate_visual_context)
+
+    def visuals(self, words, narration=None):
         store, manifest = self.store, self.store.manifest
         cues = segment_words(words, self.config.fps, manifest.audio_duration,
                              (p.word_index for p in manifest.script_pauses))
         if store.progress is not None:
             store.progress.set_total((len(cues) + 23) // 24, "batches")
+        context = self.visual_context(narration if narration is not None else " ".join(w.text for w in words))
         # Bounded batches prevent an entire long video from exceeding structured-output limits.
         records = []
         for offset in range(0, len(cues), 24):
             batch = cues[offset:offset+24]
             previous_scenes = records[-3:]
             name = f"visuals.{offset//24:03}"
-            legacy_inputs = {"cues": [c.model_dump() for c in batch],
-                                     "previous_scenes": previous_scenes,
-                                     "text_generation": self.config.text_cache_settings, "style": STYLE, "prompt": VISUAL_PROMPT}
-            inputs = {**legacy_inputs, "visual_response_version": VISUAL_RESPONSE_VERSION}
-            previous = manifest.stages.get(name)
-            # Valid canonical plans survive a wire-format change. Failed or
-            # invalid legacy plans receive the new, explicitly versioned input.
-            if previous and previous.status == "completed" and previous.input_hash == digest(legacy_inputs):
-                try:
-                    validate_visual_plan(batch, previous.result.get("data"))
-                    if previous.artifacts and all(store.path(p).is_file() and file_hash(store.path(p)) == h
-                                                  for p, h in previous.artifacts.items()):
-                        inputs = legacy_inputs
-                except (TemporaryError, OSError):
-                    pass
+            inputs = {"cues": [c.model_dump() for c in batch], "context": context,
+                      "previous_scenes": previous_scenes, "text_generation": self.config.text_cache_settings,
+                      "style": STYLE, "prompt": VISUAL_PROMPT, "visual_response_version": VISUAL_RESPONSE_VERSION}
             planned = self.json_task(name, inputs,
                                      f"visuals/batch_{offset//24:03}.json",
-                                     lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes),
-                                     validate=lambda planned, batch=batch: validate_visual_plan(batch, planned))
+                                     lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes, context),
+                                     validate=lambda planned, batch=batch: validate_visual_plan(batch, planned, context))
             records.extend(planned["cues"])
         if [r["id"] for r in records] != [c.id for c in cues]:
             raise PipelineError("Visual plan must cover every cue ID exactly once in order")
@@ -418,7 +415,7 @@ class Pipeline:
                 with progress.phase("speech"):
                     words = self.speech(script)
                 with progress.phase("visuals"):
-                    self.visuals(words)
+                    self.visuals(words, script.narration)
                 with progress.phase("images"):
                     self.images()
             with progress.phase("render"):

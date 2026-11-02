@@ -398,6 +398,8 @@ def test_cli_external_handoff_without_elevenlabs(config, tmp_path, local_speech,
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.setattr(Providers, "metadata", lambda *args: {"title": "Growth", "description": "A growth example."})
+    monkeypatch.setattr(Providers, "visual_context", FakeProviders().visual_context)
     monkeypatch.setattr(Providers, "visuals", FakeProviders().visuals)
+    monkeypatch.setattr(Providers, "post", lambda *args: pytest.fail("CLI text requests must use offline mocks"))
     assert main(["--config", str(config_path), "run", "--script", str(source), "--no-thumbnail"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "waiting_for_images"
