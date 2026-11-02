@@ -15,7 +15,7 @@ from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
 from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
                         STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_CONTEXT_PROMPT,
-                        VISUAL_CONTEXT_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION, Providers, thumbnail_prompt,
+                        VISUAL_CONTEXT_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION, Providers, scene_prompt, thumbnail_prompt,
                         validate_metadata, validate_thumbnail, validate_visual_context, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
@@ -302,6 +302,7 @@ class Pipeline:
         for cue, record in zip(cues, records):
             for field in ("scene_group", "character_ids", "scene_description", "motion"):
                 setattr(cue, field, record[field])
+            cue.scene_description = scene_prompt(cue.scene_description, cue.character_ids, context)
             Cue.model_validate(cue.model_dump())
         manifest.cues = cues
         manifest.total_frames = cues[-1].end_frame

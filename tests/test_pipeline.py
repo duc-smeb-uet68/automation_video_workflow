@@ -41,6 +41,15 @@ def image_bytes():
     return buffer.getvalue()
 
 
+def character_profile():
+    return {"id": "parent", "age_bracket": "adult in their mid-30s", "head_shape": "simple round white head",
+            "hair_style": "neat side-swept fringe", "hair_color": "jet-black",
+            "clothing": [{"style": "short-sleeve boxy tunic", "color": "royal-blue"},
+                         {"style": "straight-leg trousers", "color": "dark-navy"}],
+            "signature_anchor": {"item": "round wire-rim glasses", "color": "black", "placement": "worn on face"},
+            "proportions": "adult-sized torso and long stick limbs", "relative_height": "twice child height"}
+
+
 class FakeProviders:
     """Offline contract fixture, never substituted into the production CLI."""
     def __init__(self, text=None):
@@ -86,7 +95,7 @@ class FakeProviders:
     def visual_context(self, narration):
         self.calls.append("visual_context")
         return {"summary": "Caregivers watch a child beside a fire.",
-                "characters": [{"id": "parent", "description": "A parent in a blue tunic."}]}
+                "characters": [character_profile()]}
 
     def visuals(self, cues, previous_scenes=None, context=None):
         self.calls.append("visuals")

@@ -4,7 +4,7 @@ from copy import deepcopy
 import httpx
 import pytest
 
-from test_pipeline import FakeProviders, config, store, visual_words
+from test_pipeline import FakeProviders, character_profile, config, store, visual_words
 from video_automation.models import Cue
 from video_automation.pipeline import Pipeline
 from video_automation.providers import Providers, STYLE, VISUAL_CONTEXT_SCHEMA, validate_visual_context
@@ -13,7 +13,7 @@ from video_automation.store import PipelineError, Store, TemporaryError, atomic_
 
 def context():
     return {"summary": "A caregiver explains why the child needs warmth before returning to the fire.",
-            "characters": [{"id": "parent", "description": "A round white-headed parent in a blue tunic."}]}
+            "characters": [character_profile()]}
 
 
 def response(data):
@@ -33,7 +33,7 @@ def test_shared_context_and_style_reach_both_text_providers(store, monkeypatch, 
         if "summary" in payload["text"]["format"]["schema"]["properties"]:
             return response(context())
         return response({"cues": {"cue_0001": {"scene_group": "camp", "character_ids": ["parent"],
-            "scene_description": context()["characters"][0]["description"] + " Standing by a fire.", "motion": "hold"}}})
+            "scene_description": "parent stands by a fire.", "motion": "hold"}}})
 
     monkeypatch.setattr(client, "post", post)
     narration = "A child needs warmth.\nLater, return to the fire."
@@ -47,7 +47,7 @@ def test_shared_context_and_style_reach_both_text_providers(store, monkeypatch, 
     assert STYLE in first and STYLE in batch
     assert json.dumps(shared, ensure_ascii=False) in batch
     assert "one main idea per scene" in batch and "2–5 words" in batch
-    assert "Repeat the supplied character descriptions in full" in batch
+    assert "Code prefixes the\nexact identity details for every listed character" in batch
 
 
 def test_script_workflow_plans_from_exact_finalized_narration(config, tmp_path):
@@ -77,9 +77,9 @@ def test_script_workflow_plans_from_exact_finalized_narration(config, tmp_path):
 
 @pytest.mark.parametrize("invalid", [
     {}, {"summary": " ", "characters": []}, {"summary": "Summary", "characters": "parent"},
-    {"summary": "Summary", "characters": [{"id": "parent", "description": " "}]},
-    {"summary": "Summary", "characters": [{"id": " parent", "description": "Blue tunic"}]},
-    {"summary": "Summary", "characters": [{"id": "parent", "description": "Blue tunic"}] * 2},
+    {"summary": "Summary", "characters": [{"id": "parent", "description": "Legacy free-form appearance"}]},
+    {"summary": "Summary", "characters": [{**character_profile(), "id": " parent"}]},
+    {"summary": "Summary", "characters": [character_profile()] * 2},
     {"summary": "Summary", "characters": [], "extra": True},
 ])
 def test_invalid_shared_context_is_rejected(invalid):
@@ -147,7 +147,7 @@ def test_changed_shared_appearance_invalidates_batches_but_preserves_speech(stor
     pipeline = Pipeline(store, provider)
     pipeline.visuals(words)
     before = store.manifest.stages["visuals.000"].input_hash
-    shared["characters"][0]["description"] = "A round white-headed parent in a green tunic."
+    shared["characters"][0]["clothing"][0]["color"] = "forest-green"
     store.path("visual_context.json").unlink()
     pipeline.visuals(words)
     assert provider.calls.count("visuals") == 6
