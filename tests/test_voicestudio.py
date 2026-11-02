@@ -231,7 +231,27 @@ def test_alignment_retry_reuses_audio(config, tmp_path, local_speech, monkeypatc
     assert pipeline.store.manifest.usage == []
 
 
-def test_force_alignment_uses_configured_ffmpeg_and_cpu_pcm(config, tmp_path, monkeypatch):
+def test_alignment_version_refresh_preserves_completed_speech(config, tmp_path, local_speech, monkeypatch):
+    pipeline = create(config, tmp_path)
+    script = pipeline.script()
+    alignments = []
+    def align(*args):
+        alignments.append(True)
+        return align_fixture(*args)
+    monkeypatch.setattr(speech, "force_align", align)
+    pipeline.speech(script)
+    source = file_hash(pipeline.store.path("audio/source.wav"))
+    previous = pipeline.store.manifest.stages["speech.align"].input_hash
+    monkeypatch.setattr(speech, "ALIGNMENT_VERSION", speech.ALIGNMENT_VERSION + 1)
+    pipeline.speech(script)
+    assert len(alignments) == 2 and len(local_speech) == 1
+    assert pipeline.store.manifest.stages["speech.align"].input_hash != previous
+    assert pipeline.store.manifest.stages["speech.chunk.0001"].attempts == 1
+    assert file_hash(pipeline.store.path("audio/source.wav")) == source
+
+
+@pytest.mark.parametrize("invalid_timing", [False, True, None])
+def test_force_alignment_uses_configured_ffmpeg_and_cpu_pcm(config, tmp_path, monkeypatch, invalid_timing):
     audio = tmp_path / "source.wav"
     audio.write_bytes(wav_bytes())
     samples = object()
@@ -249,17 +269,32 @@ def test_force_alignment_uses_configured_ffmpeg_and_cpu_pcm(config, tmp_path, mo
     class Model:
         def align(self, value, text, **options):
             assert value is samples and text == "Hello."
-            assert options == {"language": "en", "regroup": False, "failure_threshold": 0.0, "verbose": None}
-            return types.SimpleNamespace(to_dict=lambda: {"segments": [{"words": [{"word": "Hello.", "start": 0, "end": 1}]}]})
+            # Punctuation splitting and postprocessing can collapse words in
+            # otherwise valid long recordings. Return that failure if enabled.
+            assert options["language"] == "en" and options["regroup"] is False
+            assert options["failure_threshold"] == 0.0 and options["verbose"] is None
+            end = 0 if invalid_timing is not False or options.get("presplit", True) or options.get("suppress_silence", True) else 1
+            return types.SimpleNamespace(to_dict=lambda: {"segments": [{"words": [{"word": "Hello.", "start": 0, "end": end}]}]})
     def load_model(name, device):
         calls.append((name, device))
         return Model()
     monkeypatch.setitem(sys.modules, "stable_whisper", types.SimpleNamespace(load_model=load_model))
     monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(set_num_threads=lambda threads: None))
     monkeypatch.setitem(sys.modules, "numpy", types.SimpleNamespace(frombuffer=frombuffer, float32="float32"))
-    result = speech.force_align(config, audio, make_script("Hello."))
-    assert result["words"][0]["text"] == "Hello."
-    assert calls == [("base.en", "cpu")]
+    from video_automation import ctc_alignment
+    def refine(value, narration, tokens):
+        assert value is samples and narration == "Hello."
+        calls.append("refine")
+        return [dict(token, end=1) for token in tokens] if invalid_timing is None else tokens
+    monkeypatch.setattr(ctc_alignment, "refine_instant_words", refine)
+    if invalid_timing:
+        with pytest.raises(PipelineError, match="token 1 has invalid or zero-duration timing") as error:
+            speech.force_align(config, audio, make_script("Hello."))
+        assert "Local forced alignment failed (PipelineError)" not in str(error.value)
+    else:
+        result = speech.force_align(config, audio, make_script("Hello."))
+        assert result["words"][0]["text"] == "Hello."
+    assert calls == ([("base.en", "cpu")] if invalid_timing is False else [("base.en", "cpu"), "refine"])
     assert not (tmp_path / "alignment_input.tmp.wav").exists()
 
 

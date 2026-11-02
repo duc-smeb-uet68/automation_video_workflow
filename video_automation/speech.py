@@ -21,7 +21,7 @@ from .timing import aligned_words, pause_timing, SPEECH_SAMPLE_RATE
 
 
 ALIGNMENT_MODEL = "base.en"
-ALIGNMENT_VERSION = 1
+ALIGNMENT_VERSION = 2
 
 
 class BackendUnavailable(TemporaryError):
@@ -52,6 +52,8 @@ def alignment_readiness() -> dict:
         try:
             import stable_whisper
             import whisper
+            import torchaudio
+            available = callable(getattr(torchaudio.functional, "forced_align", None))
             url = whisper._MODELS[ALIGNMENT_MODEL]
             root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "whisper"
             model = root / url.rsplit("/", 1)[-1]
@@ -170,13 +172,15 @@ def map_alignment(script, tokens: list[dict], duration: float) -> dict:
     expected = "".join(script.narration.split())
     spans, offset = [], 0
     try:
-        for token in tokens:
+        for index, token in enumerate(tokens, 1):
             text = "".join(token["word"].split())
             if not text:
                 continue
             start, end = float(token["start"]), float(token["end"])
-            if not (0 <= start < end <= duration) or (spans and start < spans[-1][3] - 0.00001):
-                raise ValueError("invalid token timing")
+            if not (0 <= start < end <= duration):
+                raise ValueError(f"alignment token {index} has invalid or zero-duration timing ({start:g} to {end:g} seconds)")
+            if spans and start < spans[-1][3] - 0.00001:
+                raise ValueError(f"alignment token {index} overlaps the preceding token")
             spans.append((offset, offset + len(text), start, end, text))
             offset += len(text)
         if "".join(t[4] for t in spans) != expected:
@@ -194,7 +198,7 @@ def map_alignment(script, tokens: list[dict], duration: float) -> dict:
                               char_start=match.start(), char_end=match.end(), sentence_id=sentence.id).model_dump())
             offset = last
     except (KeyError, TypeError, ValueError, StopIteration, IndexError) as exc:
-        raise PipelineError("Forced alignment failed exact text coverage or valid word timing; generated audio is preserved") from exc
+        raise PipelineError(f"Forced alignment failed exact text coverage or valid word timing: {exc}; generated audio is preserved") from exc
     result = {"format": "word_alignment_v1", "narration": script.narration, "words": words}
     aligned_words(script, result, duration)
     return result
@@ -219,12 +223,26 @@ def force_align(config, audio: Path, script) -> dict:
         finally:
             decoded.unlink(missing_ok=True)
         model = stable_whisper.load_model(ALIGNMENT_MODEL, device="cpu")
+        # Punctuation splitting can collapse real short words. Keep the
+        # acoustic alignment unchanged and validate every original word below.
         result = model.align(samples, script.narration, language="en", regroup=False,
-                             failure_threshold=0.0, verbose=None)
+                             presplit=False, suppress_silence=False, failure_threshold=0.0, verbose=None)
         if result is None:
             raise PipelineError("Forced alignment failed; generated audio is preserved")
         tokens = [word for segment in result.to_dict()["segments"] for word in segment["words"]]
-        return map_alignment(script, tokens, media.audio_duration(config, audio))
+        duration = media.audio_duration(config, audio)
+        try:
+            return map_alignment(script, tokens, duration)
+        except PipelineError:
+            if not any(token.get("start") == token.get("end") for token in tokens):
+                raise
+            from .ctc_alignment import MODEL_NAME, refine_instant_words
+            tokens = refine_instant_words(samples, script.narration, tokens)
+            aligned = map_alignment(script, tokens, duration)
+            aligned["refinement_model"] = MODEL_NAME
+            return aligned
+    except PipelineError:
+        raise
     except (RuntimeError, ValueError, KeyError, OSError) as exc:
         raise PipelineError(f"Local forced alignment failed ({type(exc).__name__}); generated audio is preserved") from exc
 
@@ -263,7 +281,7 @@ def voicestudio_speech(store, script):
     source = store.path("audio/source.wav")
 
     def align():
-        adapter.announce("Aligning original narration on CPU; first use downloads the base.en alignment model.")
+        adapter.announce("Aligning original narration on CPU; alignment models download on first use.")
         data = force_align(config, source, script)
         data["source_audio_sha256"] = file_hash(source)
         write_json(store.path("audio/word_alignment.json"), data)
