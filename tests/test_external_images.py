@@ -144,6 +144,69 @@ def test_provider_boundary_disables_image_requests_for_external_jobs(config, mon
         client.image("A scene.")
 
 
+def test_prompt_refresh_blocks_render_and_preserves_speech(config, tmp_path, monkeypatch):
+    import video_automation.pipeline as orchestration
+
+    pipeline = create_pipeline(config, tmp_path)
+    assert pipeline.run()["status"] == "waiting_for_images"
+    store, provider = pipeline.store, pipeline.providers
+    for cue in store.manifest.cues:
+        atomic_bytes(store.path(f"images/{cue.id}.png"), image_bytes())
+    rendered = []
+    monkeypatch.setattr(media, "render", lambda store: rendered.append(True))
+    monkeypatch.setattr(media, "finish", lambda store: None)
+    monkeypatch.setattr(media, "validate", lambda store: {"passed": True})
+    assert pipeline.run()["passed"]
+    audio = file_hash(store.path("audio/narration.wav"))
+    speech_calls = provider.calls.count("speech")
+    monkeypatch.setattr(orchestration, "STYLE", orchestration.STYLE + "\nUse a different color palette.")
+    resumed = Pipeline(Store(store.folder, config), provider)
+    report = resumed.run()
+    assert report["status"] == resumed.store.manifest.status == "waiting_for_images"
+    assert len(report["invalid_images"]) == len(store.manifest.cues)
+    assert rendered == [True]
+    for cue in resumed.store.manifest.cues:
+        Image.new("RGB", (640, 360), "blue").save(store.path(f"images/{cue.id}.png"))
+    assert resumed.run()["passed"]
+    assert rendered == [True, True]
+    assert file_hash(store.path("audio/narration.wav")) == audio
+    assert provider.calls.count("speech") == speech_calls and "image" not in provider.calls
+
+
+@pytest.mark.parametrize("replace_before_resume", [False, True])
+def test_changed_prompt_requires_replacement_without_overwriting_adopted_image(config, replace_before_resume):
+    store = external_store(config)
+    provider = FakeProviders()
+    for cue in store.manifest.cues:
+        atomic_bytes(store.path(f"images/{cue.id}.png"), image_bytes())
+    Pipeline(store, provider).images()
+    original_stages = {name: stage.model_dump() for name, stage in store.manifest.stages.items()
+                       if name.startswith("image.cue_")}
+    path = store.path("images/cue_0001.png")
+    original = path.read_bytes(), path.stat().st_mtime_ns
+    store.manifest.cues[0].scene_description = "A completely different scene."
+    store.save()
+    if not replace_before_resume:
+        for _ in range(2):
+            resumed = Pipeline(Store(store.folder, config), provider)
+            with pytest.raises(ImagesPending) as pending:
+                resumed.images()
+            assert pending.value.report["ready_images"] == 1
+            assert pending.value.report["invalid_images"][0]["path"] == "images/cue_0001.png"
+            assert "different prompt" in pending.value.report["invalid_images"][0]["error"]
+            assert resumed.store.manifest.cues[0].image_path is None
+            assert original == (path.read_bytes(), path.stat().st_mtime_ns)
+            assert original_stages == {name: stage.model_dump() for name, stage in resumed.store.manifest.stages.items()
+                                       if name.startswith("image.cue_")}
+    Image.new("RGB", (640, 360), "blue").save(path)
+    resumed = Pipeline(Store(store.folder, config), provider)
+    resumed.images()
+    assert read_json(store.path("external_images.json"))["status"] == "ready"
+    assert resumed.store.manifest.stages["image.cue_0001"].artifacts["images/cue_0001.png"] == file_hash(path)
+    assert resumed.store.manifest.stages["image.cue_0002"].model_dump() == original_stages["image.cue_0002"]
+    assert provider.calls == [] and resumed.store.manifest.usage == []
+
+
 def test_existing_api_jobs_keep_mode_and_external_job_identity_is_distinct(config, tmp_path):
     config.image_mode = "api"
     old = create_pipeline(config, tmp_path)

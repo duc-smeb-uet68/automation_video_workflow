@@ -69,22 +69,46 @@ def refine_instant_words(samples, narration: str, tokens: list[dict]) -> list[di
     """Re-align bounded context windows; never interpolate missing word timing."""
     words = narration.split()
     duration = len(samples) / SAMPLE_RATE
-    if len(words) != len(tokens) or any("".join(t.get("word", "").split()) != w for t, w in zip(tokens, words)):
-        raise PipelineError("Acoustic refinement requires exact original word coverage")
-    previous_end, windows = 0.0, []
-    for index, token in enumerate(tokens):
-        start, end = float(token["start"]), float(token["end"])
+    grouped, instant_words = [], set()
+    partial, previous_end = "", 0.0
+    for token in tokens:
+        try:
+            part = "".join(token["word"].split())
+            if not part:
+                continue
+            start, end = float(token["start"]), float(token["end"])
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise PipelineError("Acoustic refinement rejected invalid coarse tokens") from exc
         if not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end <= duration and start >= previous_end):
             raise PipelineError("Acoustic refinement rejected invalid or unordered coarse timing")
         previous_end = end
+        index = len(grouped)
+        if index >= len(words) or not words[index].startswith(partial + part):
+            raise PipelineError("Acoustic refinement requires exact original word coverage")
+        if not partial:
+            combined = dict(token, start=start, end=end)
+        else:
+            combined.update(word=partial + part, end=end)
+        partial += part
         if start == end:
-            lo, hi = max(0, index-7), min(len(words), index+8)
-            if windows and lo <= windows[-1][1]:
-                windows[-1][1] = hi
-            else:
-                windows.append([lo, hi])
+            instant_words.add(index)
+        if partial == words[index]:
+            grouped.append(combined)
+            partial = ""
+    if partial or len(grouped) != len(words) or not grouped:
+        raise PipelineError("Acoustic refinement requires exact original word coverage")
+    windows = []
+    for index in sorted(instant_words):
+        lo, hi = max(0, index-7), min(len(words), index+8)
+        if windows and lo <= windows[-1][1]:
+            windows[-1][1] = hi
+        else:
+            windows.append([lo, hi])
     if not windows:
         return tokens
+    # Refine whole original words even when only one constituent token has
+    # zero duration. Grouping never supplies replacement acoustic timing.
+    tokens = grouped
     print(f"Refining word timing on CPU in {len(windows)} acoustic windows; first use downloads wav2vec2 weights.",
           file=sys.stderr, flush=True)
     model, labels = load_model()

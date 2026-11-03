@@ -68,6 +68,63 @@ def test_valid_timing_never_loads_refinement_model(monkeypatch):
     assert ctc.refine_instant_words([0] * 32000, "Hello.", tokens) is tokens
 
 
+@pytest.mark.parametrize("instant_index", [1, 3, 4])
+def test_refinement_groups_split_tokens_and_preserves_original_offsets(monkeypatch, instant_index):
+    text = "You're 38%!\nCafé."
+    tokens = [{"word": word, "start": float(i), "end": i + 0.5}
+              for i, word in enumerate([" You", "'re", " 38", "%!", " Café."])]
+    tokens[instant_index]["end"] = tokens[instant_index]["start"]
+    original = [dict(token) for token in tokens]
+    calls = []
+    monkeypatch.setattr(ctc, "load_model", lambda: ("model", LABELS))
+    def align(model, labels, samples, words):
+        calls.append(words)
+        return [(0.1, 1.5), (2.1, 3.5), (4.1, 4.5)]
+    monkeypatch.setattr(ctc, "align_window", align)
+    repaired = ctc.refine_instant_words([0] * 80000, text, tokens)
+    assert calls == [["You're", "38%!", "Café."]]
+    words = map_alignment(make_script(text), repaired, 5)["words"]
+    assert [(w["text"], w["start"], w["end"]) for w in words] == [
+        ("You're", 0.1, 1.5), ("38%!", 2.1, 3.5), ("Café.", 4.1, 4.5)]
+    assert all(text[w["char_start"]:w["char_end"]] == w["text"] for w in words)
+    assert tokens == original
+
+
+@pytest.mark.parametrize("corruption", ["crosses_word", "missing", "overlap", "negative", "nan"])
+def test_split_token_refinement_rejects_invalid_source_before_model_load(monkeypatch, corruption):
+    tokens = [{"word": "You", "start": 0., "end": .4},
+              {"word": "'re", "start": .4, "end": .4},
+              {"word": " ready.", "start": .6, "end": 1.}]
+    if corruption == "crosses_word":
+        tokens[1]["word"], tokens[2]["word"] = "'rer", "eady."
+    elif corruption == "missing":
+        tokens.pop()
+    elif corruption == "overlap":
+        tokens[1]["start"] = .3
+    elif corruption == "negative":
+        tokens[1]["start"] = -.1
+    else:
+        tokens[1]["end"] = math.nan
+    monkeypatch.setattr(ctc, "load_model", lambda: pytest.fail("must not load acoustic weights"))
+    with pytest.raises(PipelineError):
+        ctc.refine_instant_words([0] * 32000, "You're ready.", tokens)
+
+
+def test_refinement_preserves_split_words_outside_acoustic_windows(monkeypatch):
+    tokens = [{"word": f"word{i}", "start": float(i), "end": i + .5} for i in range(35)]
+    text = " ".join(token["word"] for token in tokens)
+    expected = map_alignment(make_script(text), tokens, 36)["words"]
+    tokens[18]["end"] = tokens[18]["start"]
+    tokens[:1] = [{"word": "word", "start": 0., "end": .25},
+                  {"word": "0", "start": .25, "end": .5}]
+    monkeypatch.setattr(ctc, "load_model", lambda: ("model", LABELS))
+    monkeypatch.setattr(ctc, "align_window", lambda model, labels, samples, words:
+                        [(i + .2, i + .5) for i in range(len(words))])
+    repaired = ctc.refine_instant_words([0] * (36 * 16000), text, tokens)
+    actual = map_alignment(make_script(text), repaired, 36)["words"]
+    assert actual[:11] == expected[:11] and actual[26:] == expected[26:]
+
+
 def test_acoustic_frame_conversion_keeps_last_word_inside_recording():
     torch = pytest.importorskip("torch")
     pytest.importorskip("torchaudio")

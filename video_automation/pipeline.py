@@ -382,6 +382,14 @@ class Pipeline:
                     continue
                 validation = media.check_image(path)
                 inputs = {"prompt": record["prompt"], "source": "external", "image": validation["sha256"], "version": 1}
+                previous = manifest.stages.get(f"image.{cue.id}")
+                if (previous and previous.result.get("source") == "external"
+                        and previous.artifacts.get(relative) == validation["sha256"]
+                        and previous.input_hash != digest(inputs)):
+                    # Keep the original adoption checkpoint so repeated resumes
+                    # cannot associate unchanged bytes with a different prompt.
+                    raise PipelineError("External image was adopted for a different prompt; "
+                                        "replace it using the current image_prompts.json before resuming")
                 store.task(f"image.{cue.id}", inputs, lambda relative=relative, validation=validation: {
                     "files": [relative], "validation": validation, "source": "external"})
                 cue.image_path = relative

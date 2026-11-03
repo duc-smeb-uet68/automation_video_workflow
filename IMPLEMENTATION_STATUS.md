@@ -1,6 +1,16 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-11-02. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+Latest offline verification on 2026-11-03. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+
+## External image freshness and split-token VoiceStudio recovery
+
+External scene adoption now compares unchanged image bytes with the existing prompt checkpoint. If the prompt differs, the file is reported under `invalid_images` and the job waits before rendering. Repeated resumes preserve the original image bytes, modification time, and adoption checkpoint without consuming image attempts. A replacement image is adopted normally, including when supplied before the first resume with a changed prompt. Existing manifests and checkpoint hashes remain compatible.
+
+VoiceStudio acoustic recovery now validates and groups split tokens into exact original words before choosing refinement windows. A zero-duration constituent triggers acoustic refinement even when the combined word already spans a positive interval. Text, Unicode offsets, and timing outside the refinement windows remain intact. Token overlaps, missing text, invalid times, and tokens crossing word boundaries remain errors. Valid speech and alignment checkpoints are unchanged; failed alignment can use the existing bounded retry controls without regenerating speech.
+
+Before the fixes, targeted regressions reproduced stale image adoption and three split-token alignment failures. After the fixes, the focused external-image, CTC alignment, and VoiceStudio suite passes **83 tests in 64.18 seconds**, using `.venv/Scripts/python.exe -m pytest -q tests/test_external_images.py tests/test_ctc_alignment.py tests/test_voicestudio.py -p no:cacheprovider --tb=short --basetemp=.test-tmp/workflow-fixes-focused`. Coverage includes prompt refresh blocking rendering, replacement recovery, exact offsets for contractions/numerals/Unicode, invalid split-token rejection, forced-alignment dispatch, real FFmpeg rendering, and cached speech preservation. No retained jobs, configuration, credentials, or source media were changed, and no live generation occurred.
+
+The complete offline suite passes **502 tests in 154.46 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/workflow-fixes-full`. This includes real FFmpeg rendering, audio finishing, image replacement, pause handling, provider contracts, and historical job compatibility. `git diff --check` passes. Live speech quality, generated-image quality, and full topic-to-video acceptance were not exercised by this change.
 
 ## Structured character continuity in scene prompts
 

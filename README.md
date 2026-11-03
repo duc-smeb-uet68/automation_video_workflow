@@ -65,6 +65,8 @@ Run and resume commands stay the same:
 
 The only per-video handoff is copying scene images and resuming. Audio generation, alignment, subtitles, and rendering run automatically. Chunk, assembly, alignment, and pause checkpoints are independent: retrying alignment does not regenerate speech, and a valid cached resume does not require VoiceStudio to be open. Use `resume JOB_ID --retry-failed` if a stage has exhausted its bounded attempts. `request_timeout_seconds` also controls each local speech request.
 
+Acoustic recovery groups split alignment tokens into the exact original whitespace-delimited words before selecting refinement windows. A zero-duration part of a contraction or numeral triggers acoustic refinement of the whole word. Invalid token order, overlaps, text mismatches, and tokens crossing original word boundaries still stop alignment. Existing valid alignment checkpoints remain reusable; retrying a failed alignment uses the corrected recovery without regenerating speech.
+
 New jobs save nonsecret speech settings in their manifest and reuse them on resume. VoiceStudio settings contribute to default job identity. Changing the provider or settings requires a new job; reusing an explicit job ID with different speech settings is rejected. Historical jobs without saved speech settings retain ElevenLabs behavior even if the global configuration now selects VoiceStudio. Loading those jobs does not rewrite their manifests. `status` remains read-only.
 
 `doctor` reports executable, API, voice, alignment dependency, and cached-model readiness without launching VoiceStudio, downloading weights, or generating speech. Before the first alignment, an uncached model is reported as not ready; an actual run downloads it. A stopped app is also reported as unavailable even when automatic startup is configured. The earlier ElevenLabs setup instructions and single-request character-alignment behavior apply only to ElevenLabs speech.
@@ -86,6 +88,8 @@ python -m video_automation resume JOB_ID
 ```
 
 Resume reuses valid preparation checkpoints, validates and records file hashes for supplied images, and renders when all expected images are ready. Partial or invalid copies leave the job waiting without consuming image attempts. Repeated resumes do not call image APIs. Replacing an image and resuming adopts the replacement and rebuilds affected clips and final output. Image-provider model/key settings do not invalidate external-image checkpoints. Text and speech can still incur charges if their own checkpoints need regeneration.
+
+If a scene prompt changes after its external image was adopted, unchanged image bytes are stale. Resume lists the file under `invalid_images` in `external_images.json` with a different-prompt error and returns `waiting_for_images` before rendering. The original file and adoption checkpoint remain intact across repeated resumes, without consuming image attempts. Generate a replacement from the current `image_prompts.json`, save it under the same cue filename, and resume. Raster validation alone does not establish that an image matches the current prompt.
 
 Existing jobs saved before this feature retain API-image mode when resumed. To explicitly use external images for an existing schema-version-2 native-text job:
 

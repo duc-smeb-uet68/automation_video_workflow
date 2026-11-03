@@ -316,6 +316,36 @@ def test_partial_chunk_recovery(config, tmp_path, monkeypatch):
     assert calls[0] != calls[1] and calls[1] == calls[2]
 
 
+def test_force_alignment_recovers_split_tokens_with_acoustic_refinement(config, tmp_path, monkeypatch):
+    from video_automation import ctc_alignment as ctc
+
+    audio = tmp_path / "source.wav"
+    audio.write_bytes(wav_bytes())
+    samples = [0.] * (8 * 16000)
+    class Array:
+        def astype(self, dtype):
+            return self
+        def __truediv__(self, value):
+            return samples
+    tokens = [{"word": " You", "start": 0., "end": .4},
+              {"word": "'re", "start": .4, "end": .4},
+              {"word": " ready.", "start": .6, "end": 1.}]
+    result = types.SimpleNamespace(to_dict=lambda: {"segments": [{"words": tokens}]})
+    model = types.SimpleNamespace(align=lambda *args, **kwargs: result)
+    monkeypatch.setitem(sys.modules, "stable_whisper", types.SimpleNamespace(load_model=lambda *a, **k: model))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(set_num_threads=lambda threads: None))
+    monkeypatch.setitem(sys.modules, "numpy", types.SimpleNamespace(frombuffer=lambda *a, **k: Array(), float32="float32"))
+    monkeypatch.setattr(ctc, "load_model", lambda: ("model", ()))
+    def align_window(model, labels, waveform, words):
+        assert words == ["You're", "ready."] and waveform == samples
+        return [(0., .5), (.6, 1.)]
+    monkeypatch.setattr(ctc, "align_window", align_window)
+    aligned = speech.force_align(config, audio, make_script("You're ready."))
+    assert aligned["refinement_model"] == ctc.MODEL_NAME
+    assert [(word["text"], word["start"], word["end"]) for word in aligned["words"]] == [
+        ("You're", 0., .5), ("ready.", .6, 1.)]
+
+
 def test_saved_provider_identity_and_historical_preservation(config, tmp_path):
     pipeline = create(config, tmp_path)
     folder = pipeline.store.folder
