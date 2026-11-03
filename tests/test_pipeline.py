@@ -845,6 +845,32 @@ def visual_words(store, count=200):
                  sentence_id=f"sentence_{i}") for i in range(count)]
 
 
+def test_sentence_boundary_change_refreshes_visual_plan_and_then_reuses_cache(store, monkeypatch):
+    words = visual_words(store, 20)
+    for index, word in enumerate(words):
+        word.start, word.end = index * 0.2, (index + 1) * 0.2
+        word.sentence_id = "first" if index < 15 else "second"
+    store.manifest.audio_duration = 4
+    legacy_cues = [Cue(id=f"cue_{index + 1:04}", text=" ".join(w.text for w in words[first:end]),
+                       start=words[first].start, end=words[end - 1].end, word_start=first, word_end=end)
+                   for index, (first, end) in enumerate([(0, 14), (14, 20)])]
+    assign_frames(legacy_cues, store.config.fps, 4)
+    provider = FakeProviders()
+    with monkeypatch.context() as legacy:
+        legacy.setattr("video_automation.pipeline.segment_words", lambda *args: legacy_cues)
+        Pipeline(store, provider).visuals(words)
+    original_hash = store.manifest.stages["visuals.000"].input_hash
+
+    restored = Store(store.folder, store.config)
+    Pipeline(restored, provider).visuals(words)
+    assert [(cue.word_start, cue.word_end) for cue in restored.manifest.cues] == [(0, 15), (15, 20)]
+    assert restored.manifest.stages["visuals.000"].input_hash != original_hash
+    assert provider.calls == ["visual_context", "visuals", "visuals"]
+
+    Pipeline(Store(store.folder, store.config), provider).visuals(words)
+    assert provider.calls == ["visual_context", "visuals", "visuals"]
+
+
 @pytest.mark.parametrize("invalid", ["missing", "duplicate", "unexpected", "reordered", "blank", "character", "schema"])
 def test_visual_batch_retries_invalid_plan_before_checkpoint(store, invalid):
     provider = FakeProviders()
