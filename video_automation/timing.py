@@ -154,8 +154,20 @@ def segment_words(words: list[Word], fps: int, duration: float, pause_word_indic
         last = index == len(words) - 1
         sentence_end = last or words[index + 1].sentence_id != word.sentence_id
         count = index - first + 1
-        if (last or index + 1 in pause_word_indices or (count >= 4 and sentence_end)
-                or count >= 14 or word.end - words[first].start >= 5):
+        limit_reached = count >= 14 or word.end - words[first].start >= 5
+        nearby_sentence_end = False
+        if limit_reached and not sentence_end:
+            # Keep a short ending with its sentence, within bounded extra time.
+            for following in range(index + 1, min(index + 4, len(words))):
+                if following in pause_word_indices or words[following].end - word.end > 1.5:
+                    break
+                if following == len(words) - 1 or words[following + 1].sentence_id != word.sentence_id:
+                    nearby_sentence_end = True
+                    break
+        # A fragment of an already split sentence must not absorb the next idea.
+        continuation = first > 0 and words[first - 1].sentence_id == word.sentence_id
+        if (last or index + 1 in pause_word_indices or (sentence_end and (count >= 4 or continuation))
+                or (limit_reached and not nearby_sentence_end)):
             groups.append((first, index + 1))
             first = index + 1
     # Merge boundaries that round onto the same frame. All text stays present.
