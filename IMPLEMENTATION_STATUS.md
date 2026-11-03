@@ -2,6 +2,14 @@
 
 Latest offline verification on 2026-11-03. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
 
+## Three prompt files
+
+The workflow now writes `image_prompts_1.json`, `image_prompts_2.json`, and `image_prompts_3.json` immediately after checkpointing `image_prompts.json`, before external-image handoff or API image generation. The original file remains intact. Each split contains a consecutive portion of the same ordered records. Counts are equal when divisible by three; otherwise, earlier files receive the remainder, with at most one prompt difference. All three files exist even when some contain empty arrays.
+
+A separate checkpoint tracks all three outputs. Resume reuses intact files, repairs missing or modified files, and creates the files for older compatible jobs without invalidating cached image generation. Prompt changes refresh the splits. Prompt splitting does not increase image progress counts.
+
+The full offline suite passes **528 tests in 140.35 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/prompt-split-full`. Focused checks pass 36 prompt/external-image tests and 27 prompt/progress tests. Coverage includes balanced counts, fewer than three prompts, exact record order and content, both image modes, creation before image requests, cached resume, file repair, older checkpoints, and prompt changes. No live generation or live acceptance occurred.
+
 ## Sentence-ending cue boundaries
 
 The completed octopus job exposed a scene change during "carry oxygen" because the 14-word cutoff moved "oxygen" into the next cue, alongside the sentence about a heart pausing. Cue segmentation now allows at most three additional words and 1.5 additional seconds to reach the current sentence ending. Explicit pauses still split cues. When a sentence must remain split, its final fragment ends before the next sentence; short complete sentences retain their previous grouping. Changed cue records already participate in visual-plan cache inputs, so affected plans refresh without a blanket cache-version change.

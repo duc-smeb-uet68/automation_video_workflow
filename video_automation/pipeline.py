@@ -342,6 +342,19 @@ class Pipeline:
 
         prompts = self.json_task("image.prompts", {"prompts": expected, "prompt_version": 2},
                                  "image_prompts.json", lambda: expected, validate=validate_prompts)
+
+        def split_prompts():
+            size, remainder = divmod(len(prompts), 3)
+            files, offset = [], 0
+            for index in range(3):
+                end = offset + size + (index < remainder)
+                relative = f"image_prompts_{index + 1}.json"
+                write_json(store.path(relative), prompts[offset:end])
+                files.append(relative)
+                offset = end
+            return {"files": files}
+
+        store.task("image.prompts.split", {"prompts": prompts, "split_version": 1}, split_prompts)
         if manifest.image_mode == "external":
             self.external_images(prompts)
             return

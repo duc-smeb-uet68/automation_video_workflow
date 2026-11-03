@@ -79,7 +79,11 @@ New jobs save nonsecret speech settings in their manifest and reuse them on resu
 python -m video_automation run .\narration.txt
 ```
 
-The command prepares `script.txt`, `video_metadata.json`, `audio/narration.wav`, `alignment.json`, `transcript.json`, `subtitles.en.srt`, and `image_prompts.json`. If images are missing or invalid, it returns success with `status: "waiting_for_images"`, the job ID, metadata path, prompt path, image directory, and report path. It does not mark the job completed, create placeholder images, or render a partial video. `external_images.json` lists every expected filename and any missing or invalid files.
+The command prepares `script.txt`, `video_metadata.json`, `audio/narration.wav`, `alignment.json`, `transcript.json`, `subtitles.en.srt`, and `image_prompts.json`.
+
+It then splits the prompts into `image_prompts_1.json`, `image_prompts_2.json`, and `image_prompts_3.json` in the same job directory, before the image handoff or any API image request. These files contain consecutive portions of the original `{cue_id, prompt}` list, preserving every record and its order. Counts are equal when divisible by three; otherwise, earlier files receive one extra prompt, so counts differ by at most one. All three files are created even with fewer than three prompts; unused files contain `[]`. The original file is retained. Resume reuses intact split files and recreates missing or modified files, including for older compatible jobs, without regenerating cached narration or images.
+
+If images are missing or invalid, the command returns success with `status: "waiting_for_images"`, the job ID, metadata path, prompt path, image directory, and report path. It does not mark the job completed, create placeholder images, or render a partial video. `external_images.json` lists every expected filename and any missing or invalid files.
 
 Generate one image per saved prompt in your external AI, then copy the results as `images/cue_0001.png`, `images/cue_0002.png`, and so on inside that job. Filenames must match cue IDs. Images must be valid raster files, approximately 16:9 and at least 320×180; 1920×1080 matches the default output. External-image mode never overwrites these supplied files. Then run:
 
@@ -275,6 +279,7 @@ This workflow applies only to new jobs. Older manifests and incompatible generat
 | `transcript.json`, `visuals/` | Permanent cue IDs and scene plans |
 | `external_images.json` | Expected image paths, valid image count, and missing/invalid file details in external-image mode |
 | `image_prompts.json` | Ordered `{cue_id, prompt}` list containing the exact complete text for each image request |
+| `image_prompts_1.json`, `image_prompts_2.json`, `image_prompts_3.json` | Three consecutive portions of the full prompt list, with counts differing by at most one |
 | `images/` | One validated image per cue, with any requested text drawn by the image AI |
 | `render/prepared/`, `render/clips/`, `render/clips.txt` | Prepared image plates, encoded cue clips, and concatenation order |
 | `rough.mp4`, `render_metadata.json` | Synchronized rough cut and absolute frame boundaries |
