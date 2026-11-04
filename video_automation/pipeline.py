@@ -22,6 +22,9 @@ from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, f
 from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
 
 
+VISUAL_BATCH_SIZE = 8
+
+
 class ImagesPending(Exception):
     """A normal handoff to the user, with no failed stage or retry consumed."""
 
@@ -313,19 +316,19 @@ class Pipeline:
         cues = segment_words(words, self.config.fps, manifest.audio_duration,
                              (p.word_index for p in manifest.script_pauses), **arguments)
         if store.progress is not None:
-            store.progress.set_total((len(cues) + 23) // 24, "batches")
+            store.progress.set_total((len(cues) + VISUAL_BATCH_SIZE - 1) // VISUAL_BATCH_SIZE, "batches")
         context = self.visual_context(narration if narration is not None else " ".join(w.text for w in words))
         # Bounded batches prevent an entire long video from exceeding structured-output limits.
         records = []
-        for offset in range(0, len(cues), 24):
-            batch = cues[offset:offset+24]
+        for offset in range(0, len(cues), VISUAL_BATCH_SIZE):
+            batch = cues[offset:offset+VISUAL_BATCH_SIZE]
             previous_scenes = records[-3:]
-            name = f"visuals.{offset//24:03}"
+            name = f"visuals.{offset//VISUAL_BATCH_SIZE:03}"
             inputs = {"cues": [c.model_dump() for c in batch], "context": context,
                       "previous_scenes": previous_scenes, "text_generation": self.config.text_cache_settings,
                       "style": STYLE, "prompt": VISUAL_PROMPT, "visual_response_version": VISUAL_RESPONSE_VERSION}
             planned = self.json_task(name, inputs,
-                                     f"visuals/batch_{offset//24:03}.json",
+                                     f"visuals/batch_{offset//VISUAL_BATCH_SIZE:03}.json",
                                      lambda batch=batch, previous_scenes=previous_scenes: self.providers.visuals(batch, previous_scenes, context),
                                      validate=lambda planned, batch=batch: validate_visual_plan(batch, planned, context))
             records.extend(planned["cues"])

@@ -2,6 +2,12 @@
 
 Latest offline verification on 2026-11-04. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
 
+## Eight-cue visual batches
+
+Scene planning now requests at most 8 cues per batch instead of 24, reducing the size of the strict object schema sent to the text provider. Batch slicing, checkpoint numbering, and progress totals use the same batch size. The response format, semantic validation, three-scene continuity context, and cue-splitting section size are unchanged. Different cue inputs invalidate older 24-cue checkpoints on resume without resetting unrelated preparation work.
+
+Focused visual/context/identity/progress verification passed **59 tests in 5.42 seconds**. The complete offline suite passed **562 tests in 144.28 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/visual-eight-full`. Offline HTTP recovery tests simulate the reported grammar rejection both before any completed scene batch and after one completed legacy batch. They verify that resumed strict schemas contain at most 8 cues, cover every cue in order, reuse intact checkpoints on subsequent resumes, and preserve speech, alignment, cue plans, shared context, and saved raw responses. `git diff --check` passes. No live requests or retained-job resumes were performed.
+
 ## Short image pacing prompt
 
 `CUE_SPLIT_PROMPT` now targets 2–3.5 seconds per image instead of the initial 3–10-second range and soft 12-second ceiling. Complete sentences remain together only when they fit the shorter target. Longer sentences split at meaningful clauses or grammatical phrases; the prompt also asks the model to account for gaps before the next cue and rebalance short final fragments. Required pauses and section boundaries retain precedence. When a target cannot be met at whole-word boundaries, the model is instructed to choose the closest feasible natural boundary. This is prompt guidance, not a new duration validation gate, and does not guarantee every rendered image hold falls within the range.
