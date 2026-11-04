@@ -2,9 +2,15 @@
 
 Latest offline verification on 2026-11-04. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
 
+## Natural cue grouping prompt
+
+`CUE_SPLIT_PROMPT` now supplies editorial preferences instead of an empty placeholder. It prioritizes complete sentences and coherent visual ideas, allows related short sentences to share a scene, and keeps short dramatic statements separate when appropriate. Long sentences can split at meaningful clauses. The prompt discourages cuts inside grammatical phrases and list items and asks the model to inspect both sides of each boundary for orphaned fragments. Timing guidance targets roughly 3–10 seconds with a soft 12-second ceiling; explicit pauses and section boundaries remain mandatory. Python validation and the JSON/index contract are unchanged.
+
+Focused cue/timing verification passed **41 tests in 4.06 seconds**. The complete offline suite passed **560 tests in 151.17 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-prompt-full`. `git diff --check` passes. No live API requests were made. Offline tests verify prompt forwarding and cache behavior, not the naturalness of AI decisions with this prompt.
+
 ## AI cue boundaries
 
-Generated script/topic runs now select cue boundaries with the configured text provider after speech alignment, before scene planning. The editable `CUE_SPLIT_PROMPT` in `video_automation/providers.py` is intentionally empty. Code supplies only the required JSON/index contract and narration context; the user's grouping preferences can be added independently. Responses contain exclusive global end-word indices. Python preserves original narration and timing, rejects reordered or missing coverage, and requires boundaries at explicit pauses. Existing frame-collapse and final-image hold behavior remains intact.
+Generated script/topic runs now select cue boundaries with the configured text provider after speech alignment, before scene planning. At introduction, the editable `CUE_SPLIT_PROMPT` in `video_automation/providers.py` was intentionally empty, with only the required JSON/index contract and narration context supplied by code. Responses contain exclusive global end-word indices. Python preserves original narration and timing, rejects reordered or missing coverage, and requires boundaries at explicit pauses. Existing frame-collapse and final-image hold behavior remains intact.
 
 Planning sections contain at most 240 words, prefer sentence endings, and include full narration plus nearby indexed timing context. Each section has an independent checkpoint under `cue_plans/`; retries preserve completed sections and speech. Prompt, contract, model, narration, and alignment inputs participate in cache keys. Requests reuse the `visuals` cost cap and raw-response ledger. Existing compatible generated jobs acquire these checkpoints on full resume and can refresh downstream scene grouping; fixture/imported jobs retain supplied cues.
 

@@ -72,7 +72,7 @@ def test_plan_retries_invalid_result_then_reuses_checkpoint(store):
     assert len(received) == 2
     assert received[0][0]["required_pause_boundaries"] == [2]
     assert received[0][0]["words"][0]["text"] == "One"
-    assert received[0][1] == ""
+    assert received[0][1] == orchestration.CUE_SPLIT_PROMPT
     assert store.manifest.stages["cue.plan.000000"].attempts == 2
     assert Pipeline(Store(store.folder, store.config), provider).cue_plan(words, "One two. Three four.") == [2, 4]
     assert len(received) == 2
