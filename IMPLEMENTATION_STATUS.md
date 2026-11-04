@@ -1,6 +1,14 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-11-03. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+Latest offline verification on 2026-11-04. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+
+## AI cue boundaries
+
+Generated script/topic runs now select cue boundaries with the configured text provider after speech alignment, before scene planning. The editable `CUE_SPLIT_PROMPT` in `video_automation/providers.py` is intentionally empty. Code supplies only the required JSON/index contract and narration context; the user's grouping preferences can be added independently. Responses contain exclusive global end-word indices. Python preserves original narration and timing, rejects reordered or missing coverage, and requires boundaries at explicit pauses. Existing frame-collapse and final-image hold behavior remains intact.
+
+Planning sections contain at most 240 words, prefer sentence endings, and include full narration plus nearby indexed timing context. Each section has an independent checkpoint under `cue_plans/`; retries preserve completed sections and speech. Prompt, contract, model, narration, and alignment inputs participate in cache keys. Requests reuse the `visuals` cost cap and raw-response ledger. Existing compatible generated jobs acquire these checkpoints on full resume and can refresh downstream scene grouping; fixture/imported jobs retain supplied cues.
+
+Focused cue/timing verification passed **41 tests in 4.59 seconds**. The final complete offline suite passed **560 tests in 145.91 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-plan-final-full`. Coverage includes both text-provider HTTP contracts, malformed outputs and refusals, invalid indices, explicit pauses, cache invalidation and corruption, bounded sections and partial recovery, budget reservations, and real FFmpeg rendering with AI-selected boundaries. A changed grouping prompt refreshes cues and scene prompts without regenerating speech; stale adopted images return to the external-image handoff. `git diff --check` passes. No live API requests occurred, and local configuration, credentials, and retained jobs were not modified. Natural grouping quality with the user's future prompt remains unverified.
 
 ## Three prompt files
 

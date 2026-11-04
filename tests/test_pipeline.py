@@ -61,6 +61,16 @@ class FakeProviders:
         self.calls.append("research")
         return {"sources": [{"url": "https://example.org/study", "title": "Fixture", "supported_claims": ["Fixture"]}]}
 
+    def cue_plan(self, context, instructions):
+        # Preserve the established renderer fixtures while new tests exercise AI-selected boundaries.
+        words = [Word.model_validate({key: value for key, value in record.items() if key != "index"})
+                 for record in context["words"]
+                 if context["word_start"] <= record["index"] < context["word_end"]]
+        first = context["word_start"]
+        cues = segment_words(words, 30, words[-1].end,
+                             [index - first for index in context["required_pause_boundaries"]])
+        return {"cue_end_word_indices": [first + cue.word_end for cue in cues]}
+
     def script(self, topic, research):
         self.calls.append("script")
         return {"narration": self.text, "source_references": ["https://example.org/study"]}

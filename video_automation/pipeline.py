@@ -13,10 +13,11 @@ from PIL import Image
 from . import media
 from .models import Cue, Manifest, Script
 from .progress import WorkflowProgress
-from .providers import (AUDIT_PROMPT, METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
+from .providers import (AUDIT_PROMPT, CUE_SPLIT_CONTRACT, CUE_SPLIT_PROMPT, CUE_SPLIT_SCHEMA,
+                        METADATA_PROMPT, METADATA_SCHEMA, RESEARCH_PROMPT, SCRIPT_PROMPT,
                         STYLE, THUMBNAIL_LAYOUT, THUMBNAIL_PROMPT, THUMBNAIL_SCHEMA, VISUAL_CONTEXT_PROMPT,
                         VISUAL_CONTEXT_SCHEMA, VISUAL_PROMPT, VISUAL_RESPONSE_VERSION, Providers, scene_prompt, thumbnail_prompt,
-                        validate_metadata, validate_thumbnail, validate_visual_context, validate_visual_plan)
+                        validate_cue_plan, validate_metadata, validate_thumbnail, validate_visual_context, validate_visual_plan)
 from .store import PipelineError, Store, TemporaryError, atomic_bytes, digest, file_hash, read_json, write_json
 from .timing import SPEECH_SAMPLE_RATE, aligned_words, make_script, normalize, parse_script_input, pause_timing, segment_words, subtitles
 
@@ -276,10 +277,41 @@ class Pipeline:
                               "visual_context.json", lambda: self.providers.visual_context(narration),
                               validate=validate_visual_context)
 
-    def visuals(self, words, narration=None):
+    def cue_plan(self, words, narration):
+        """Select exact word boundaries in bounded, independently resumable sections."""
+        ends, first = [], 0
+        pauses = {pause.word_index for pause in self.store.manifest.script_pauses}
+        while first < len(words):
+            end = min(first + 240, len(words))
+            if end < len(words):
+                sentence_ends = [index for index in range(first + 1, end + 1)
+                                 if words[index - 1].sentence_id != words[index].sentence_id]
+                if sentence_ends:
+                    end = sentence_ends[-1]
+            context = {"narration": narration, "word_start": first, "word_end": end,
+                       "required_pause_boundaries": sorted(index for index in pauses if first < index < end),
+                       "words": [{"index": index, **words[index].model_dump()}
+                                 for index in range(max(0, first - 24), min(len(words), end + 24))]}
+            planned = self.json_task(
+                f"cue.plan.{first:06}",
+                {"context": context, "text_generation": self.config.text_cache_settings,
+                 "prompt": CUE_SPLIT_PROMPT, "contract": CUE_SPLIT_CONTRACT,
+                 "schema": CUE_SPLIT_SCHEMA, "version": 1},
+                f"cue_plans/words_{first:06}.json",
+                lambda context=context: self.providers.cue_plan(context, CUE_SPLIT_PROMPT),
+                validate=lambda data, first=first, end=end, context=context: validate_cue_plan(
+                    data, first, end, context["required_pause_boundaries"]))
+            ends.extend(planned["cue_end_word_indices"])
+            first = end
+        validate_cue_plan({"cue_end_word_indices": ends}, 0, len(words),
+                          [index for index in pauses if 0 < index < len(words)])
+        return ends
+
+    def visuals(self, words, narration=None, cue_end_word_indices=None):
         store, manifest = self.store, self.store.manifest
+        arguments = {} if cue_end_word_indices is None else {"cue_end_word_indices": cue_end_word_indices}
         cues = segment_words(words, self.config.fps, manifest.audio_duration,
-                             (p.word_index for p in manifest.script_pauses))
+                             (p.word_index for p in manifest.script_pauses), **arguments)
         if store.progress is not None:
             store.progress.set_total((len(cues) + 23) // 24, "batches")
         context = self.visual_context(narration if narration is not None else " ".join(w.text for w in words))
@@ -437,7 +469,8 @@ class Pipeline:
                 with progress.phase("speech"):
                     words = self.speech(script)
                 with progress.phase("visuals"):
-                    self.visuals(words, script.narration)
+                    boundaries = self.cue_plan(words, script.narration)
+                    self.visuals(words, script.narration, boundaries)
                 with progress.phase("images"):
                     self.images()
             with progress.phase("render"):
