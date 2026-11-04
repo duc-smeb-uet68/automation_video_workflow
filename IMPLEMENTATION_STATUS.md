@@ -2,7 +2,13 @@
 
 Latest offline verification on 2026-11-04. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
 
-## Natural cue grouping prompt
+## Short image pacing prompt
+
+`CUE_SPLIT_PROMPT` now targets 2–3.5 seconds per image instead of the initial 3–10-second range and soft 12-second ceiling. Complete sentences remain together only when they fit the shorter target. Longer sentences split at meaningful clauses or grammatical phrases; the prompt also asks the model to account for gaps before the next cue and rebalance short final fragments. Required pauses and section boundaries retain precedence. When a target cannot be met at whole-word boundaries, the model is instructed to choose the closest feasible natural boundary. This is prompt guidance, not a new duration validation gate, and does not guarantee every rendered image hold falls within the range.
+
+Focused cue/timing verification passed **41 tests in 4.07 seconds**. The complete offline suite passed **560 tests in 146.45 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-short-full`. `git diff --check` passes. No live AI generation or retained-job resume was performed.
+
+## Initial natural cue grouping prompt
 
 `CUE_SPLIT_PROMPT` now supplies editorial preferences instead of an empty placeholder. It prioritizes complete sentences and coherent visual ideas, allows related short sentences to share a scene, and keeps short dramatic statements separate when appropriate. Long sentences can split at meaningful clauses. The prompt discourages cuts inside grammatical phrases and list items and asks the model to inspect both sides of each boundary for orphaned fragments. Timing guidance targets roughly 3–10 seconds with a soft 12-second ceiling; explicit pauses and section boundaries remain mandatory. Python validation and the JSON/index contract are unchanged.
 

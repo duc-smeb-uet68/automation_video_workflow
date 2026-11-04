@@ -64,14 +64,16 @@ Each cue will receive one scene image. Group the narration into coherent spoken 
 not subtitle lines or equally sized chunks. Read the full narration for context, but
 select boundaries only within the requested word range.
 
-Prefer a complete sentence as one cue when it describes one coherent idea. A sentence
-lasting about 8 seconds does not need a split merely because it contains many words.
-Related short sentences may share a cue when they develop the same visual idea.
+Prefer a complete sentence as one cue when it describes one coherent idea and fits
+within 2-3.5 seconds. Split longer sentences into meaningful clauses or grammatical
+phrases rather than keeping a long sentence on one image.
+Related short sentences may share a cue when they develop the same visual idea and
+their combined duration fits within 2-3.5 seconds.
 Keep a short, complete dramatic statement, question, reveal, or transition separate
 when it deserves its own visual beat. Do not merge unrelated ideas just to meet a duration target.
 
-Split a long sentence only where a meaningful clause or distinct visual idea ends.
-Prefer a complete thought before a change of subject, action, setting, time, or argument.
+Split a long sentence where a meaningful clause, grammatical phrase, or distinct visual
+idea ends. Prefer a complete thought before a change of subject, action, setting, time, or argument.
 Punctuation is evidence, not an automatic boundary: commas in dates, introductory
 phrases, names, and lists do not by themselves justify a split. Keep related list items
 together when one scene can represent them. If a long list needs several scenes,
@@ -84,15 +86,19 @@ the next cue to complete their meaning. For example, keep 'a message hidden bene
 stones' together rather than ending a cue after 'hidden'. Check both sides of each
 proposed boundary, including the final cue, for awkward fragments.
 
-Use the supplied word timestamps to assess pacing. Aim for roughly 3-10 seconds per cue,
-with 12 seconds as a soft ceiling. These are preferences, not mandatory limits.
-Allow shorter cues for intentional dramatic beats and longer cues when splitting would
-damage a coherent thought. Never split solely at a fixed word count or elapsed duration.
-Do not force the same number of cues or the same cue length across different passages.
+Use the supplied word timestamps to target 2-3.5 seconds per image throughout the video.
+Choose natural boundaries within this range rather than using a fixed word count.
+Account for the gap until the next cue starts, because the current image remains visible
+during that gap. Review the final fragment of each section and adjust earlier boundaries
+to avoid an unnecessarily short final cue. Do not hold a long sentence on one image just
+to preserve the whole sentence. When required pauses or available whole-word boundaries
+make the target impossible, choose the closest feasible natural boundary without changing
+words or timestamps. Do not force the same number of cues across different passages.
 
 Explicit pause boundaries and requested word-range boundaries are mandatory, even when
-they interrupt a phrase. Otherwise, prefer semantic completeness over duration and
-uniformity. Preserve every original word and its order; do not rewrite narration,
+they interrupt a phrase. Otherwise, prioritize the 2-3.5-second pacing target while
+keeping each fragment as natural as possible. Preserve every original word and its order;
+do not rewrite narration,
 invent timestamps, or output scene descriptions. Follow the supplied JSON/index contract."""
 CUE_SPLIT_CONTRACT = """Divide the indexed narration words into scene cues for the requested word range.
 Return one JSON object with cue_end_word_indices, an ordered list of exclusive global word indices.
