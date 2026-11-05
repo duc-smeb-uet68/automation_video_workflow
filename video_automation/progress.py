@@ -77,7 +77,8 @@ class WorkflowProgress:
                           attempt=details.get("attempt", stage.attempts if stage else None))
         phase = self.state["phase"]
         counted = ((phase == "visuals" and task.startswith("visuals."))
-                   or (phase == "images" and task.startswith("image.") and task != "image.prompts")
+                   or (phase == "images" and task.startswith("image.")
+                       and task not in {"image.prompts", "image.prompts.split"})
                    or (phase == "render" and task.startswith("render.")))
         if counted and event in {"stage_complete", "cache_hit"} and task not in self.seen_tasks:
             self.seen_tasks.add(task)

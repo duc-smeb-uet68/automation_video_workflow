@@ -41,6 +41,9 @@ def test_retries_and_cache_hits_have_correct_progress_counts(store):
         return {"files": []}
 
     with progress.phase("images"):
+        for name in ("image.prompts", "image.prompts.split"):
+            store.task(name, {}, lambda: {"files": []})
+        assert read_json(store.path("progress.json"))["completed_units"] == 0
         store.task("image.cue_0001", {}, generate)
         snapshot = read_json(store.path("progress.json"))
         assert snapshot["completed_units"] == snapshot["total_units"] == 1
@@ -51,6 +54,10 @@ def test_retries_and_cache_hits_have_correct_progress_counts(store):
     resumed = WorkflowProgress(store, ["images"])
     store.progress = resumed
     with resumed.phase("images"):
+        for name in ("image.prompts", "image.prompts.split"):
+            store.task(name, {}, lambda: {"files": []})
+        snapshot = read_json(store.path("progress.json"))
+        assert snapshot["cached_units"] == snapshot["completed_units"] == 0
         store.task("image.cue_0001", {}, generate)
         snapshot = read_json(store.path("progress.json"))
         assert snapshot["cached_units"] == snapshot["completed_units"] == 1

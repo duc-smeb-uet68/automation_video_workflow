@@ -61,6 +61,16 @@ class FakeProviders:
         self.calls.append("research")
         return {"sources": [{"url": "https://example.org/study", "title": "Fixture", "supported_claims": ["Fixture"]}]}
 
+    def cue_plan(self, context, instructions):
+        # Preserve the established renderer fixtures while new tests exercise AI-selected boundaries.
+        words = [Word.model_validate({key: value for key, value in record.items() if key != "index"})
+                 for record in context["words"]
+                 if context["word_start"] <= record["index"] < context["word_end"]]
+        first = context["word_start"]
+        cues = segment_words(words, 30, words[-1].end,
+                             [index - first for index in context["required_pause_boundaries"]])
+        return {"cue_end_word_indices": [first + cue.word_end for cue in cues]}
+
     def script(self, topic, research):
         self.calls.append("script")
         return {"narration": self.text, "source_references": ["https://example.org/study"]}
@@ -517,7 +527,7 @@ def test_offline_full_pipeline_renders_real_mp4(store, tmp_path, mode, text, mon
     assert progress["completed_phases"] == progress["total_phases"] == len(phases)
     assert list(dict.fromkeys(snapshot["phase"] for snapshot in snapshots)) == phases
     assert read_json(store.path("video_metadata.json"))["title"] == "Caregivers Beside the Fire"
-    for phase, total in (("visuals", (len(store.manifest.cues)+23)//24),
+    for phase, total in (("visuals", (len(store.manifest.cues)+7)//8),
                          ("images", len(store.manifest.cues)), ("render", len(store.manifest.cues))):
         completed = [snapshot for snapshot in snapshots if snapshot["phase"] == phase and snapshot["phase_status"] == "completed"][-1]
         assert completed["completed_units"] == completed["total_units"] == total
@@ -845,6 +855,62 @@ def visual_words(store, count=200):
                  sentence_id=f"sentence_{i}") for i in range(count)]
 
 
+@pytest.mark.parametrize("completed_legacy_batch", [False, True])
+def test_smaller_visual_schema_recovers_legacy_grammar_failure_without_repeating_preparation(
+        store, monkeypatch, completed_legacy_batch):
+    import video_automation.pipeline as orchestration
+    words = visual_words(store)
+    narration = " ".join(word.text for word in words)
+    provider = FakeProviders()
+    seed = Pipeline(store, provider)
+    boundaries = seed.cue_plan(words, narration)
+    original = provider.visuals
+
+    def legacy_visuals(cues, previous_scenes=None, context=None):
+        if completed_legacy_batch and cues[0].id == "cue_0001":
+            return original(cues, previous_scenes, context)
+        raise PipelineError("visuals: HTTP 400: The compiled grammar is too large")
+
+    provider.visuals = legacy_visuals
+    with monkeypatch.context() as legacy:
+        legacy.setattr(orchestration, "VISUAL_BATCH_SIZE", 24)
+        with pytest.raises(PipelineError, match="compiled grammar"):
+            seed.visuals(words, narration, boundaries)
+    for relative in ("audio/narration.wav", "alignment.json", "responses/legacy_error.json"):
+        atomic_bytes(store.path(relative), b"preserved preparation or raw response")
+    preserved = {relative: file_hash(store.path(relative)) for relative in (
+        "audio/narration.wav", "alignment.json", "responses/legacy_error.json",
+        "cue_plans/words_000000.json", "visual_context.json")}
+    monkeypatch.setenv(store.config.text_key_env, "fixture-key")
+    requests = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        ids = payload["text"]["format"]["schema"]["properties"]["cues"]["required"]
+        assert 1 <= len(ids) <= 8
+        assert payload["text"]["format"]["strict"] is True
+        requests.append(ids)
+        plan = {"cues": {cue_id: {"scene_group": "camp", "character_ids": [],
+                                 "scene_description": "A campfire.", "motion": "hold"} for cue_id in ids}}
+        return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
+            "content": [{"type": "output_text", "text": json.dumps(plan)}]}]})
+
+    original_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original_client(transport=transport, **kwargs))
+    resumed = Pipeline(Store(store.folder, store.config))
+    assert resumed.cue_plan(words, narration) == boundaries
+    resumed.visuals(words, narration, boundaries)
+    assert [len(ids) for ids in requests] == [8, 8, 8, 8, 8, 8, 2]
+    assert [cue.id for cue in resumed.store.manifest.cues] == [cue_id for ids in requests for cue_id in ids]
+    assert all(file_hash(store.path(relative)) == checksum for relative, checksum in preserved.items())
+    assert resumed.store.manifest.stages["visuals.000"].attempts == 1
+    before = len(requests)
+    cached = Pipeline(Store(store.folder, store.config))
+    cached.visuals(words, narration, cached.cue_plan(words, narration))
+    assert len(requests) == before
+
+
 def test_sentence_boundary_change_refreshes_visual_plan_and_then_reuses_cache(store, monkeypatch):
     words = visual_words(store, 20)
     for index, word in enumerate(words):
@@ -926,7 +992,7 @@ def test_invalid_visual_plan_exhausts_retries_without_completed_checkpoint(store
 @pytest.mark.parametrize("exhaust", [False, True])
 def test_incomplete_visual_output_retries_without_repeating_completed_work(store, monkeypatch, exhaust):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture-key")
-    words = visual_words(store)
+    words = visual_words(store, 96)
     atomic_bytes(store.path("audio/narration.wav"), b"completed narration")
     atomic_bytes(store.path("alignment.json"), b"completed alignment")
     preserved = {path: file_hash(store.path(path)) for path in ("audio/narration.wav", "alignment.json")}
@@ -938,7 +1004,7 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
                 "content": [{"type": "output_text", "text": json.dumps({"summary": "A campfire.", "characters": []})}]}]})
         ids = payload["text"]["format"]["schema"]["properties"]["cues"]["required"]
         calls.append(ids[0])
-        if ids[0] == "cue_0025" and not recovered[0]:
+        if ids[0] == "cue_0009" and not recovered[0]:
             if not exhaust:
                 recovered[0] = True
             return httpx.Response(200, json={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"},
@@ -954,7 +1020,7 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
         with pytest.raises(TemporaryError, match="max_output_tokens"):
             Pipeline(store).visuals(words)
         assert not store.path("visuals/batch_001.json").exists()
-        assert calls == ["cue_0001", "cue_0025", "cue_0025"]
+        assert calls == ["cue_0001", "cue_0009", "cue_0009"]
         resumed = Store(store.folder, store.config)
         with pytest.raises(PipelineError, match="retry limit reached"):
             Pipeline(resumed).visuals(words)
@@ -963,11 +1029,11 @@ def test_incomplete_visual_output_retries_without_repeating_completed_work(store
         resumed.manifest.stages["visuals.001"].attempts = 0
         resumed.save()
         Pipeline(resumed).visuals(words)
-        assert calls == ["cue_0001", "cue_0025", "cue_0025", "cue_0025", "cue_0049"]
+        assert calls == ["cue_0001", "cue_0009", "cue_0009", "cue_0009", "cue_0017"]
     else:
         Pipeline(store).visuals(words)
         resumed = Store(store.folder, store.config)
-        assert calls == ["cue_0001", "cue_0025", "cue_0025", "cue_0049"]
+        assert calls == ["cue_0001", "cue_0009", "cue_0009", "cue_0017"]
         assert resumed.manifest.stages["visuals.001"].attempts == 2
     assert resumed.manifest.stages["visuals.000"].attempts == 1
     assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
@@ -1004,7 +1070,7 @@ def test_shared_context_invalidates_legacy_visual_cache_and_keeps_speech(store, 
     atomic_bytes(store.path("alignment.json"), b"completed alignment")
     atomic_bytes(store.path("responses/visuals_bad.json"), b"preserved provider response")
     preserved = {path: file_hash(store.path(path)) for path in (
-        "audio/narration.wav", "alignment.json", "visuals/batch_000.json", "responses/visuals_bad.json")}
+        "audio/narration.wav", "alignment.json", "responses/visuals_bad.json")}
     provider = FakeProviders()
     requested = []
     original = provider.visuals
@@ -1014,10 +1080,10 @@ def test_shared_context_invalidates_legacy_visual_cache_and_keeps_speech(store, 
     provider.visuals = visuals
     resumed = Pipeline(Store(store.folder, store.config), provider)
     resumed.visuals(words)
-    assert requested == ["cue_0001", "cue_0025", "cue_0049"]
+    assert requested == ["cue_0001", "cue_0009", "cue_0017", "cue_0025", "cue_0033", "cue_0041", "cue_0049"]
     assert resumed.store.manifest.stages["visuals.000"].attempts == 1
     assert resumed.store.manifest.stages["visuals.001"].attempts == 1
     assert all(file_hash(store.path(path)) == expected for path, expected in preserved.items())
     assert [c.id for c in resumed.store.manifest.cues] == [c.id for c in cues]
     resumed.visuals(words)
-    assert requested == ["cue_0001", "cue_0025", "cue_0049"]
+    assert requested == ["cue_0001", "cue_0009", "cue_0017", "cue_0025", "cue_0033", "cue_0041", "cue_0049"]

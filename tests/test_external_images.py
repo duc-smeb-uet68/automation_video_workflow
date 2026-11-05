@@ -64,7 +64,8 @@ def test_preparation_waits_with_all_handoff_files_and_no_image_attempts(config, 
     assert store.manifest.image_mode == "external" and store.manifest.error is None
     assert store.manifest.total_frames > 0
     for path in ("script.txt", "script.json", "video_metadata.json", "audio/narration.wav", "alignment.json", "transcript.json",
-                 "image_prompts.json", "subtitles.en.srt", "external_images.json"):
+                 "image_prompts.json", "image_prompts_1.json", "image_prompts_2.json", "image_prompts_3.json",
+                 "subtitles.en.srt", "external_images.json"):
         assert store.path(path).is_file(), path
     assert store.path("images").is_dir()
     assert not list(store.path("images").iterdir())
@@ -76,6 +77,7 @@ def test_preparation_waits_with_all_handoff_files_and_no_image_attempts(config, 
     progress = read_progress(store.folder)
     assert progress["status"] == progress["phase_status"] == "waiting_for_images"
     assert progress["phase"] == "images" and progress["completed_phases"] == 5
+    assert progress["completed_units"] == 0
     assert progress["total_phases"] == 9
     before = list(provider.calls)
     resumed = Pipeline(Store(store.folder, config), provider)

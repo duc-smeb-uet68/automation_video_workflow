@@ -1,6 +1,40 @@
 # Implementation and verification status
 
-Latest offline verification on 2026-11-03. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+Latest offline verification on 2026-11-04. The native-text workflow has completed live VoiceStudio speech, alignment, and visual planning to an external-image handoff, plus a rendering smoke test with synthetic images. Full live topic/research/image/video acceptance remains incomplete. Earlier branches completed live script-mode speech plus 63 cue images and attempted live research.
+
+## Eight-cue visual batches
+
+Scene planning now requests at most 8 cues per batch instead of 24, reducing the size of the strict object schema sent to the text provider. Batch slicing, checkpoint numbering, and progress totals use the same batch size. The response format, semantic validation, three-scene continuity context, and cue-splitting section size are unchanged. Different cue inputs invalidate older 24-cue checkpoints on resume without resetting unrelated preparation work.
+
+Focused visual/context/identity/progress verification passed **59 tests in 5.42 seconds**. The complete offline suite passed **562 tests in 144.28 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/visual-eight-full`. Offline HTTP recovery tests simulate the reported grammar rejection both before any completed scene batch and after one completed legacy batch. They verify that resumed strict schemas contain at most 8 cues, cover every cue in order, reuse intact checkpoints on subsequent resumes, and preserve speech, alignment, cue plans, shared context, and saved raw responses. `git diff --check` passes. No live requests or retained-job resumes were performed.
+
+## Short image pacing prompt
+
+`CUE_SPLIT_PROMPT` now targets 2–3.5 seconds per image instead of the initial 3–10-second range and soft 12-second ceiling. Complete sentences remain together only when they fit the shorter target. Longer sentences split at meaningful clauses or grammatical phrases; the prompt also asks the model to account for gaps before the next cue and rebalance short final fragments. Required pauses and section boundaries retain precedence. When a target cannot be met at whole-word boundaries, the model is instructed to choose the closest feasible natural boundary. This is prompt guidance, not a new duration validation gate, and does not guarantee every rendered image hold falls within the range.
+
+Focused cue/timing verification passed **41 tests in 4.07 seconds**. The complete offline suite passed **560 tests in 146.45 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-short-full`. `git diff --check` passes. No live AI generation or retained-job resume was performed.
+
+## Initial natural cue grouping prompt
+
+`CUE_SPLIT_PROMPT` now supplies editorial preferences instead of an empty placeholder. It prioritizes complete sentences and coherent visual ideas, allows related short sentences to share a scene, and keeps short dramatic statements separate when appropriate. Long sentences can split at meaningful clauses. The prompt discourages cuts inside grammatical phrases and list items and asks the model to inspect both sides of each boundary for orphaned fragments. Timing guidance targets roughly 3–10 seconds with a soft 12-second ceiling; explicit pauses and section boundaries remain mandatory. Python validation and the JSON/index contract are unchanged.
+
+Focused cue/timing verification passed **41 tests in 4.06 seconds**. The complete offline suite passed **560 tests in 151.17 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-prompt-full`. `git diff --check` passes. No live API requests were made. Offline tests verify prompt forwarding and cache behavior, not the naturalness of AI decisions with this prompt.
+
+## AI cue boundaries
+
+Generated script/topic runs now select cue boundaries with the configured text provider after speech alignment, before scene planning. At introduction, the editable `CUE_SPLIT_PROMPT` in `video_automation/providers.py` was intentionally empty, with only the required JSON/index contract and narration context supplied by code. Responses contain exclusive global end-word indices. Python preserves original narration and timing, rejects reordered or missing coverage, and requires boundaries at explicit pauses. Existing frame-collapse and final-image hold behavior remains intact.
+
+Planning sections contain at most 240 words, prefer sentence endings, and include full narration plus nearby indexed timing context. Each section has an independent checkpoint under `cue_plans/`; retries preserve completed sections and speech. Prompt, contract, model, narration, and alignment inputs participate in cache keys. Requests reuse the `visuals` cost cap and raw-response ledger. Existing compatible generated jobs acquire these checkpoints on full resume and can refresh downstream scene grouping; fixture/imported jobs retain supplied cues.
+
+Focused cue/timing verification passed **41 tests in 4.59 seconds**. The final complete offline suite passed **560 tests in 145.91 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/cue-plan-final-full`. Coverage includes both text-provider HTTP contracts, malformed outputs and refusals, invalid indices, explicit pauses, cache invalidation and corruption, bounded sections and partial recovery, budget reservations, and real FFmpeg rendering with AI-selected boundaries. A changed grouping prompt refreshes cues and scene prompts without regenerating speech; stale adopted images return to the external-image handoff. `git diff --check` passes. No live API requests occurred, and local configuration, credentials, and retained jobs were not modified. Natural grouping quality with the user's future prompt remains unverified.
+
+## Three prompt files
+
+The workflow now writes `image_prompts_1.json`, `image_prompts_2.json`, and `image_prompts_3.json` immediately after checkpointing `image_prompts.json`, before external-image handoff or API image generation. The original file remains intact. Each split contains a consecutive portion of the same ordered records. Counts are equal when divisible by three; otherwise, earlier files receive the remainder, with at most one prompt difference. All three files exist even when some contain empty arrays.
+
+A separate checkpoint tracks all three outputs. Resume reuses intact files, repairs missing or modified files, and creates the files for older compatible jobs without invalidating cached image generation. Prompt changes refresh the splits. Prompt splitting does not increase image progress counts.
+
+The full offline suite passes **528 tests in 140.35 seconds**, using `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider --tb=short --basetemp=.test-tmp/prompt-split-full`. Focused checks pass 36 prompt/external-image tests and 27 prompt/progress tests. Coverage includes balanced counts, fewer than three prompts, exact record order and content, both image modes, creation before image requests, cached resume, file repair, older checkpoints, and prompt changes. No live generation or live acceptance occurred.
 
 ## Sentence-ending cue boundaries
 

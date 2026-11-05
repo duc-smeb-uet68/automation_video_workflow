@@ -98,7 +98,7 @@ def test_shared_context_survives_batch_boundaries_and_cached_resume(store):
         return original(cues, previous_scenes, context)
 
     provider.visuals = visuals
-    words = visual_words(store)
+    words = visual_words(store, 96)
     pipeline = Pipeline(store, provider)
     pipeline.visuals(words, "Complete finalized narration, including the ending.")
     assert len(received) == 3
@@ -141,7 +141,7 @@ def test_changed_shared_appearance_invalidates_batches_but_preserves_speech(stor
     provider = FakeProviders()
     shared = context()
     provider.visual_context = lambda narration: deepcopy(shared)
-    words = visual_words(store)
+    words = visual_words(store, 96)
     atomic_bytes(store.path("audio/narration.wav"), b"existing speech")
     preserved = file_hash(store.path("audio/narration.wav"))
     pipeline = Pipeline(store, provider)

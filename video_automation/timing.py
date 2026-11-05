@@ -5,7 +5,7 @@ import re
 import textwrap
 
 from .models import Cue, Script, ScriptPause, Sentence, Word
-from .store import PipelineError
+from .store import PipelineError, TemporaryError
 
 
 SPEECH_SAMPLE_RATE = 48000
@@ -146,7 +146,22 @@ def pause_timing(script: Script, alignment: dict, source_frames: int,
     return shifted, insertions
 
 
-def segment_words(words: list[Word], fps: int, duration: float, pause_word_indices=()) -> list[Cue]:
+def validate_cue_boundaries(ends, word_start, word_end, pause_boundaries=()):
+    """Reject boundaries that lose words, reorder them, or span explicit pauses."""
+    if (not isinstance(ends, list) or not ends or any(type(end) is not int for end in ends)
+            or ends[-1] != word_end
+            or any(left >= right for left, right in zip([word_start] + ends, ends))
+            or not set(pause_boundaries) <= set(ends)):
+        raise TemporaryError("Invalid cue plan: boundaries must cover the word range once and preserve explicit pauses")
+
+
+def segment_words(words: list[Word], fps: int, duration: float, pause_word_indices=(),
+                  cue_end_word_indices=None) -> list[Cue]:
+    if cue_end_word_indices is not None:
+        validate_cue_boundaries(cue_end_word_indices, 0, len(words),
+                                [index for index in pause_word_indices if 0 < index < len(words)])
+        groups = list(zip([0] + cue_end_word_indices[:-1], cue_end_word_indices))
+        return cues_from_groups(words, groups, fps, duration)
     groups = []
     first = 0
     pause_word_indices = set(pause_word_indices)
@@ -170,6 +185,11 @@ def segment_words(words: list[Word], fps: int, duration: float, pause_word_indic
                 or (limit_reached and not nearby_sentence_end)):
             groups.append((first, index + 1))
             first = index + 1
+    return cues_from_groups(words, groups, fps, duration)
+
+
+def cues_from_groups(words, groups, fps, duration):
+    """Build timed cues while retaining the shared frame-collapse handling."""
     # Merge boundaries that round onto the same frame. All text stays present.
     merged = []
     for first, end in groups:
